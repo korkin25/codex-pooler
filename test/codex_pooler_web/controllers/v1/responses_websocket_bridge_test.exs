@@ -1485,7 +1485,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
   end
 
   @tag :rollout_drain_t3
-  test "T3 marker makes the websocket bridge fall back to plain HTTP", %{conn: conn} do
+  test "T3 marker rejects a new bridged HTTP request before upstream work", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.sse_stream([completed_event("resp_marker_fallback")]))
     setup = gateway_setup(upstream)
     session = "marker-fallback-#{System.unique_integer([:positive])}"
@@ -1493,19 +1493,20 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
 
     response = post_stream(conn, setup, session, stream_payload(setup, "marker fallback"))
 
-    assert response.status == 200
-    assert completed_id(response.resp_body) == "resp_marker_fallback"
+    assert %{
+             "error" => %{
+               "code" => "server_is_overloaded",
+               "message" => "upstream request failed",
+               "type" => "server_error"
+             }
+           } = json_response(response, 503)
 
-    request = latest_request(setup.pool)
-    assert request.status == "succeeded"
-    assert request.transport == "http_sse"
-    assert [attempt] = attempts_for(request)
-    assert attempt.status == "succeeded"
-    assert attempt.transport == "http_sse"
-    assert_no_upstream_websocket_metadata(attempt)
+    assert Repo.aggregate(Request, :count) == 0
+    assert Repo.aggregate(Attempt, :count) == 0
+    assert Repo.aggregate(LedgerEntry, :count) == 0
     assert FakeUpstream.websocket_connection_count(upstream) == 0
-    assert FakeUpstream.http_request_count(upstream) == 1
-    assert settlement_count(request) == 1
+    assert FakeUpstream.http_request_count(upstream) == 0
+    assert FakeUpstream.requests(upstream) == []
   end
 
   test "uses the websocket bridge without a Pool toggle", %{conn: conn} do

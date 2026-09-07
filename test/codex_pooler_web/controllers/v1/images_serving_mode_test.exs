@@ -35,7 +35,7 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
       assert captured.json["stream"] == true
       assert [tool] = image_tools(captured.json, @mode)
       assert tool["type"] == "image_generation"
-      assert tool["model"] == "gpt-image-2"
+      assert tool["model"] == "gpt-image-1"
       assert tool["quality"] == "medium"
 
       if @operation == "edits" do
@@ -51,8 +51,8 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
 
       assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
       assert request.status == "succeeded"
-      assert request.request_metadata["requested_model"] == "gpt-image-2"
-      assert request.request_metadata["effective_model"] == "gpt-image-2"
+      assert request.request_metadata["requested_model"] == "gpt-image-1"
+      assert request.request_metadata["effective_model"] == "gpt-image-1"
       assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
       assert attempt.status == "succeeded"
 
@@ -193,7 +193,105 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
     assert Repo.aggregate(Attempt, :count) == 0
   end
 
-  defp setup_host(upstream, mode) do
+  for mode <- ["full", "lite"],
+      {model, options, fidelity} <-
+        [{"gpt-image-2", :mask, nil}] ++
+          for(
+            model <- ["gpt-image-2", "gpt-image-1-mini"],
+            options <- [:fidelity, :both],
+            fidelity <- ["low", "high"],
+            do: {model, options, fidelity}
+          ) ++
+          for(
+            model <- ["gpt-image-1", "gpt-image-1.5"],
+            fidelity <- ["low", "high"],
+            do: {model, :fidelity, fidelity}
+          ) do
+    @mode mode
+    @options options
+    @image_model model
+    @fidelity fidelity
+    test "#{@image_model} edit with #{@options} #{@fidelity} obeys #{@mode} fidelity policy", %{
+      conn: conn
+    } do
+      source = png(255, 0, 0)
+      mask = png(0, 255, 0)
+      upstream = start_upstream(image_stream(Base.encode64(png(0, 0, 255))))
+      setup = setup_host(upstream, @mode, @image_model)
+      fields = [{"model", @image_model}, {"prompt", "synthetic image"}, {"quality", "high"}]
+
+      fields =
+        if @options in [:fidelity, :both],
+          do: fields ++ [{"input_fidelity", @fidelity}],
+          else: fields
+
+      parts =
+        for {key, value} <- fields,
+            do:
+              "--edit-options\r\nContent-Disposition: form-data; name=\"#{key}\"\r\n\r\n#{value}\r\n"
+
+      uploads =
+        if @options in [:mask, :both],
+          do: [{"image", source}, {"mask", mask}],
+          else: [{"image", source}]
+
+      files =
+        for {key, bytes} <- uploads,
+            do: [
+              "--edit-options\r\nContent-Disposition: form-data; name=\"#{key}\"; filename=\"sample.png\"\r\nContent-Type: image/png\r\n\r\n",
+              bytes,
+              "\r\n"
+            ]
+
+      response =
+        conn
+        |> auth(setup)
+        |> put_req_header("content-type", "multipart/form-data; boundary=edit-options")
+        |> post("/v1/images/edits", IO.iodata_to_binary([parts, files, "--edit-options--\r\n"]))
+
+      if @image_model in ["gpt-image-2", "gpt-image-1-mini"] and @options != :mask do
+        assert %{"error" => %{"param" => "input_fidelity", "type" => "invalid_request_error"}} =
+                 json_response(response, 400)
+
+        assert FakeUpstream.count(upstream) == 0
+        assert Repo.aggregate(Request, :count) == 0
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert Repo.aggregate(LedgerEntry, :count) == 0
+      else
+        assert %{"data" => [_]} = json_response(response, 200)
+        assert [captured] = FakeUpstream.requests(upstream)
+        assert captured.path == "/backend-api/codex/responses"
+        assert [tool] = image_tools(captured.json, @mode)
+        assert tool["model"] == @image_model
+        assert tool["quality"] == "high"
+        assert Map.has_key?(tool, "input_fidelity") == @options in [:fidelity, :both]
+        if @options in [:fidelity, :both], do: assert(tool["input_fidelity"] == @fidelity)
+        assert Map.has_key?(tool, "input_image_mask") == @options in [:mask, :both]
+
+        if @options in [:mask, :both] do
+          assert %{"image_url" => "data:image/png;base64," <> encoded} = tool["input_image_mask"]
+          assert Base.decode64!(encoded) == mask
+        end
+
+        content = captured.json["input"] |> Enum.flat_map(&Map.get(&1, "content", []))
+
+        assert [
+                 %{"type" => "input_text", "text" => "synthetic image"},
+                 %{"type" => "input_image", "image_url" => "data:image/png;base64," <> encoded}
+               ] = content
+
+        assert Base.decode64!(encoded) == source
+        assert [request] = Repo.all(Request)
+        assert request.status == "succeeded"
+        assert request.request_metadata["effective_model"] == @image_model
+        assert [attempt] = Repo.all(Attempt)
+        assert attempt.response_metadata["routing"]["model_serving_mode"] == @mode
+        assert_usage_settled_once(request, attempt)
+      end
+    end
+  end
+
+  defp setup_host(upstream, mode, image_model \\ "gpt-image-1") do
     setup = gateway_setup(upstream)
 
     setup.model
@@ -208,7 +306,7 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
     |> Repo.update!()
 
     setup.api_key
-    |> Ecto.Changeset.change(allowed_model_identifiers: ["gpt-image-2"])
+    |> Ecto.Changeset.change(allowed_model_identifiers: [image_model])
     |> Repo.update!()
 
     timestamp = DateTime.utc_now()
@@ -226,10 +324,9 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
 
   defp image_request(conn, "generations", _source) do
     post(conn, "/v1/images/generations", %{
-      "model" => "gpt-image-2",
+      "model" => "gpt-image-1",
       "prompt" => "synthetic image",
-      "quality" => "medium",
-      "input_fidelity" => "high"
+      "quality" => "medium"
     })
   end
 
@@ -242,7 +339,7 @@ defmodule CodexPoolerWeb.V1.ImagesServingModeTest do
   defp multipart(boundary, source) do
     fields =
       for {key, value} <- [
-            {"model", "gpt-image-2"},
+            {"model", "gpt-image-1"},
             {"prompt", "synthetic image"},
             {"quality", "medium"},
             {"input_fidelity", "high"}

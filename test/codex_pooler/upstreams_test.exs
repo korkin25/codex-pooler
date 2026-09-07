@@ -1449,13 +1449,13 @@ defmodule CodexPooler.UpstreamsTest do
 
       auth_json =
         auth_json_fixture(account_id: "acct_workspace_label_only", id_token: id_token)
-        |> Jason.decode!()
+        |> CodexPooler.JSON.decode!()
         |> Map.merge(%{
           "workspace_id" => "untrusted_payload_workspace",
           "workspace_label" => "Untrusted Payload Workspace",
           "seat_type" => "untrusted-seat"
         })
-        |> Jason.encode!()
+        |> CodexPooler.JSON.encode!()
 
       assert {:ok, %{identity: identity}} =
                Upstreams.import_codex_auth_json(scope, pool, auth_json)
@@ -2172,7 +2172,7 @@ defmodule CodexPooler.UpstreamsTest do
 
       invalid_cases = [
         {"not-json", "Codex auth.json is malformed"},
-        {Jason.encode!(%{"OPENAI_API_KEY" => sensitive_token}),
+        {CodexPooler.JSON.encode!(%{"OPENAI_API_KEY" => sensitive_token}),
          "Codex API-key auth.json is not supported"},
         {auth_json_fixture(access_token: jwt_token(%{"exp" => past_unix()})),
          "Codex auth.json access token is expired"},
@@ -2207,12 +2207,12 @@ defmodule CodexPooler.UpstreamsTest do
       unsupported_message = "Codex personal access token auth.json is not supported in this cycle"
 
       payloads = [
-        Jason.encode!(%{
+        CodexPooler.JSON.encode!(%{
           "auth_mode" => "personalAccessToken",
           "personalAccessToken" => personal_access_token
         }),
-        Jason.encode!(%{"personalAccessToken" => personal_access_token}),
-        Jason.encode!(%{
+        CodexPooler.JSON.encode!(%{"personalAccessToken" => personal_access_token}),
+        CodexPooler.JSON.encode!(%{
           "tokens" => %{
             "access_token" => personal_access_token,
             "id_token" => id_token_fixture(),
@@ -3399,7 +3399,7 @@ defmodule CodexPooler.UpstreamsTest do
                DateTime.diff(reset_at, synced_at, :second)
     end
 
-    test "preserves exact provider allow status on account windows only" do
+    test "preserves distinct provider allow status on account and model windows" do
       synced_at = ~U[2026-04-27 10:00:00Z]
 
       assert {:ok, windows} =
@@ -3446,8 +3446,8 @@ defmodule CodexPooler.UpstreamsTest do
 
       assert [model_window] = Enum.filter(windows, &(&1.quota_scope == "model"))
 
-      refute Map.has_key?(model_window.metadata, "rate_limit_allowed")
-      refute Map.has_key?(model_window.metadata, "rate_limit_reached")
+      assert model_window.metadata["rate_limit_allowed"] == false
+      assert model_window.metadata["rate_limit_reached"] == true
     end
 
     test "preserves rejected provider status on weekly primary normalized as account secondary" do
@@ -4229,7 +4229,7 @@ defmodule CodexPooler.UpstreamsTest do
 
     test "persists reset-bearing usage windows with precise evidence dimensions" do
       identity = active_identity_fixture()
-      observed_at = ~U[2026-04-27 14:00:00Z]
+      observed_at = DateTime.utc_now()
       reset_at = DateTime.add(observed_at, 900, :second)
 
       assert {:ok, windows} =
@@ -10481,7 +10481,7 @@ defmodule CodexPooler.UpstreamsTest do
       "tokens" => tokens,
       "last_refresh" => "2026-05-03T00:00:00Z"
     }
-    |> Jason.encode!()
+    |> CodexPooler.JSON.encode!()
   end
 
   defp id_token_fixture do
@@ -10497,7 +10497,7 @@ defmodule CodexPooler.UpstreamsTest do
 
   defp jwt_token(payload) do
     header = %{"alg" => "none", "typ" => "JWT"}
-    encode = &Base.url_encode64(Jason.encode!(&1), padding: false)
+    encode = &Base.url_encode64(CodexPooler.JSON.encode!(&1), padding: false)
 
     Enum.join([encode.(header), encode.(payload), Base.url_encode64("sig", padding: false)], ".")
   end

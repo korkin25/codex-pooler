@@ -256,7 +256,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.QuotaConvergenceVerifier do
 
   defp equivalent_pair?(provider, persisted) do
     decimal_equal?(field(provider, :used_percent), field(persisted, :used_percent)) and
-      iso8601(field(provider, :reset_at)) == iso8601(field(persisted, :reset_at))
+      DateTime.compare(field(provider, :reset_at), field(persisted, :reset_at)) == :eq
   end
 
   defp valid_observation?(window) do

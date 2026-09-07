@@ -7,6 +7,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
 
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Alerts
+  alias CodexPooler.Alerts.Delivery.AttemptLifecycle
   alias CodexPooler.Alerts.Delivery.WebhookSigning
 
   alias CodexPooler.Alerts.Schemas.{
@@ -224,7 +225,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
            }
 
     encoded =
-      Jason.encode!(%{
+      CodexPooler.JSON.encode!(%{
         payload: request.json,
         response_metadata: attempt.response_metadata,
         failure_metadata: attempt.failure_metadata
@@ -267,6 +268,117 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
       assert attempt.failure_message == "webhook endpoint returned a retryable failure"
       assert attempt.failure_metadata["retryable"] == true
     end
+  end
+
+  test "sixth webhook notification succeeds through the real transport" do
+    fake = start_fake_upstream(FakeUpstream.json_response(%{"ok" => true}, 200))
+
+    %{incident: incident, channel: channel} =
+      alert_delivery_fixture(
+        channel_type: :webhook,
+        endpoint_url: FakeUpstream.url(fake) <> "/alerts/repeated",
+        signing_secret: "sample-signing-value"
+      )
+
+    previous = DateTime.utc_now() |> DateTime.add(-7200, :second)
+
+    for number <- 1..5 do
+      assert {:ok, _} =
+               AttemptLifecycle.insert_sent_attempt(
+                 incident,
+                 channel,
+                 number,
+                 previous,
+                 %{}
+               )
+    end
+
+    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 1)
+    attempt = List.last(attempts_for(incident, channel))
+    assert attempt.attempt_number == 6
+    assert attempt.status == "sent"
+    assert attempt.response_status_code == 200
+    assert length(FakeUpstream.requests(fake)) == 1
+  end
+
+  test "later webhook notifications retain independent retry budgets and receipts" do
+    fake = start_fake_upstream(FakeUpstream.json_response(%{"error" => "retryable"}, 503))
+
+    %{incident: incident, channel: channel} =
+      alert_delivery_fixture(
+        channel_type: :webhook,
+        endpoint_url: FakeUpstream.url(fake) <> "/alerts/repeated",
+        signing_secret: "sample-signing-value"
+      )
+
+    previous = DateTime.utc_now() |> DateTime.add(-7200, :second)
+
+    for number <- 1..5 do
+      assert {:ok, _} =
+               AttemptLifecycle.insert_sent_attempt(
+                 incident,
+                 channel,
+                 number,
+                 previous,
+                 %{}
+               )
+    end
+
+    assert {:error, %{retryable: true}} =
+             perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 1)
+
+    attempt = List.last(attempts_for(incident, channel))
+    assert attempt.attempt_number == 6
+    assert attempt.max_attempts == 5
+    assert DateTime.diff(attempt.next_retry_at, attempt.completed_at, :second) == 60
+
+    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 5)
+    terminal = List.last(attempts_for(incident, channel))
+    assert terminal.attempt_number == 7
+    assert terminal.status == "failed"
+    refute terminal.retryable
+    assert terminal.next_retry_at == nil
+    assert length(FakeUpstream.requests(fake)) == 2
+  end
+
+  test "later webhook transport failures retain independent retry budgets" do
+    fake = start_fake_upstream(FakeUpstream.close_before_headers())
+
+    %{incident: incident, channel: channel} =
+      alert_delivery_fixture(
+        channel_type: :webhook,
+        endpoint_url: FakeUpstream.url(fake) <> "/alerts/repeated",
+        signing_secret: "sample-signing-value"
+      )
+
+    previous = DateTime.utc_now() |> DateTime.add(-7200, :second)
+
+    for number <- 1..5 do
+      assert {:ok, _} =
+               AttemptLifecycle.insert_sent_attempt(
+                 incident,
+                 channel,
+                 number,
+                 previous,
+                 %{}
+               )
+    end
+
+    assert {:error, %{retryable: true}} =
+             perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 1)
+
+    attempt = List.last(attempts_for(incident, channel))
+    assert attempt.attempt_number == 6
+    assert attempt.max_attempts == 5
+    assert DateTime.diff(attempt.next_retry_at, attempt.completed_at, :second) == 60
+
+    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 5)
+    terminal = List.last(attempts_for(incident, channel))
+    assert terminal.attempt_number == 7
+    assert terminal.status == "failed"
+    refute terminal.retryable
+    assert terminal.next_retry_at == nil
+    assert length(FakeUpstream.requests(fake)) == 2
   end
 
   test "webhook permanent HTTP 422 records a terminal failed attempt" do
@@ -406,7 +518,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
 
   defp assert_safe_job_args(args) do
     assert Map.keys(args) |> Enum.all?(&is_binary/1)
-    encoded_args = Jason.encode!(args)
+    encoded_args = CodexPooler.JSON.encode!(args)
 
     for fragment <- @forbidden_arg_fragments do
       refute encoded_args =~ fragment

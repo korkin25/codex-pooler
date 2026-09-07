@@ -69,7 +69,7 @@ Use the dedicated setup pages when configuring an agent or editor that has its o
 - [Cline](/clients/cline/)
 - [Goose](/clients/goose/)
 - [Hermes Agent](/clients/hermes/)
-- [Kilo](/clients/kilo/)
+- [Kilo Code](/clients/kilo-code/)
 - [OpenCode](/clients/opencode/)
 - [OpenClaw](/clients/openclaw/)
 - [OpenHands](/clients/openhands/)
@@ -324,9 +324,15 @@ const image = await client.images.generate({
 
 The translated Images routes accept `size` values `auto`, `1024x1024`, `1024x1536` and `1536x1024`, with one image per request. This is a Codex-backed subset; it does not expose every resolution or option offered by the OpenAI Images API.
 
-Standard `gpt-image-2` generation and edit requests use the native Codex image service. Uploaded edit images are forwarded transiently as image data URLs. The provider determines the returned image dimensions; a requested size does not guarantee exact output dimensions.
+Standard `gpt-image-2` generation and edit requests use the native Codex image service. Uploaded edit images are forwarded transiently as image data URLs. Accepted `size` and `quality` values are forwarded unchanged. This backend has returned dimensions and quality metadata that differ from explicit requests; inspect the returned `size` and `quality` fields and decoded image dimensions rather than treating request values as measured output. The native Codex service is distinct from the public OpenAI Images API.
 
-Requests using `mask` or `input_fidelity`, and older image model identifiers, retain the Responses image-tool translation. These options are not silently dropped or sent to the native image service. Their availability depends on the selected provider host actually producing image output; a completed text response alone is an image-generation failure.
+Edits using `mask`, and older image model identifiers, retain the Responses image-tool translation. These options are not silently dropped or sent to the native image service. Their availability depends on the selected provider host actually producing image output; a completed text response alone is an image-generation failure.
+
+`mask` and `input_fidelity` are edit-only options. An uploaded mask becomes the image tool's `input_image_mask`; transparent regions identify the areas to edit. It is not appended as an ordinary reference image or converted into prompt instructions.
+
+`input_fidelity` is accepted only for `gpt-image-1` and `gpt-image-1.5`. Omit it for `gpt-image-2`, which [always processes image inputs at high fidelity](https://developers.openai.com/api/docs/guides/image-generation#image-input-fidelity), and for `gpt-image-1-mini`, which does not support the option. Unsupported model/option combinations are rejected before dispatch.
+
+Image responses contain base64 image data. `response_format` may be omitted or set to `b64_json`; `url` and other values are rejected. The optional `user` hint accepts a string or null and is discarded before dispatch; it does not establish ownership or routing identity. Unsupported options, including image streaming and output compression, are rejected rather than silently ignored.
 
 ### Audio transcriptions
 
@@ -337,6 +343,8 @@ endpoints when a client needs spoken output or live voice conversations.
 `POST /v1/audio/transcriptions` accepts `gpt-transcribe` as a caller alias. The
 gateway uses the fixed canonical backend identity `gpt-4o-transcribe`. The alias
 is not a model-list entry or a model-discovery guarantee.
+
+The transcription adapter accepts `file`, `model`, an optional string `prompt`, decoded `keywords` and `languages` arrays, and `response_format: "json"`. The response format may also be omitted. Other response formats, scalar `language`, and `temperature` are rejected because the backend adapter does not implement their semantics. Use the explicitly supported `languages` array only when its backend language hints fit your client; it is not an automatic translation of the OpenAI `language` parameter.
 
 ```js
 import fs from "node:fs";

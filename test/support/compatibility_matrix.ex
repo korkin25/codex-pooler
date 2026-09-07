@@ -2777,6 +2777,8 @@ defmodule CodexPooler.CompatibilityMatrix do
         caller_aliases: %{"gpt-transcribe" => "gpt-4o-transcribe"},
         alias_scope: "caller_input_only",
         canonical_model: "gpt-4o-transcribe",
+        response_formats: ["json"],
+        rejected_fields: ["language", "temperature"],
         decoded_list_fields: %{
           "keywords" => %{
             upstream_name: "keywords[]",

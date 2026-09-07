@@ -107,7 +107,7 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
     assert %{"item" => %{"type" => "function_call", "call_id" => call_id} = item} = item_event
     assert completed["response"]["output"] == [item]
     assert item["name"] == "synthetic_tool"
-    assert Jason.decode!(item["arguments"]) == %{}
+    assert CodexPooler.JSON.decode!(item["arguments"]) == %{}
     {completed["response"]["id"], call_id, receive_until(state, :complete)}
   end
 
@@ -138,7 +138,7 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
           }
         }
       ],
-      "client_metadata" => %{"x-codex-turn-metadata" => Jason.encode!(metadata)},
+      "client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(metadata)},
       "stream" => true,
       "generate" => true
     }
@@ -147,7 +147,21 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
   @spec receive_until(map(), :complete | String.t() | {:error | :event, String.t()}) ::
           map() | {map(), map()}
   def receive_until(state, expected) do
+    if expected == :complete and MapSet.size(state.tasks) == 0,
+      do: state,
+      else: receive_next(state, expected)
+  end
+
+  defp receive_next(state, expected) do
+    owner_monitor = Map.get(state, :websocket_owner_monitor)
+    task_monitors = Map.get(state, :task_monitors, %{})
+
     receive do
+      {:DOWN, ref, :process, pid, _reason} = message
+      when ref == owner_monitor or
+             (is_map_key(task_monitors, pid) and :erlang.map_get(pid, task_monitors) == ref) ->
+        handle_lifecycle_message(message, state, expected)
+
       message
       when elem(message, 0) in [
              :websocket_owner_cleanup_witness,
@@ -159,24 +173,25 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
              :direct_request_cleanup,
              :codex_response_chunk
            ] ->
-        case CodexResponsesSocket.handle_info(message, state) do
-          {:ok, state} ->
-            if expected == :complete and MapSet.size(state.tasks) == 0,
-              do: state,
-              else: receive_until(state, expected)
-
-          {:push, {:text, frame}, state} ->
-            event = Jason.decode!(frame)
-
-            code = get_in(event, ["error", "code"])
-
-            if event["type"] == expected or expected == {:event, event["type"]} or
-                 (not is_nil(code) and expected == {:error, code}),
-               do: event_result(event, state, expected),
-               else: receive_until(state, expected)
-        end
+        handle_lifecycle_message(message, state, expected)
     after
       @budget -> flunk("missing bounded owner lifecycle event #{inspect(expected)}")
+    end
+  end
+
+  defp handle_lifecycle_message(message, state, expected) do
+    case CodexResponsesSocket.handle_info(message, state) do
+      {:ok, state} ->
+        receive_until(state, expected)
+
+      {:push, {:text, frame}, state} ->
+        event = CodexPooler.JSON.decode!(frame)
+        code = get_in(event, ["error", "code"])
+
+        if event["type"] == expected or expected == {:event, event["type"]} or
+             (not is_nil(code) and expected == {:error, code}),
+           do: event_result(event, state, expected),
+           else: receive_until(state, expected)
     end
   end
 

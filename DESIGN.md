@@ -843,6 +843,7 @@ of actions, lifecycle warning block via `ReconciliationStatus`.
   Fixed account rows and fresh or unknown-freshness additional rows remain
   visible. The compact row shows no freshness or history copy, reset status, or
   unconfirmed reset.
+- **Observation details:** a quota opens a compact, scrollable evidence dialog using saved-reset typography and disclosure patterns. The selected record comes first; other records follow by evidence timestamp, newest first. Five records are initially visible, with a total count and Show all for the remainder. Only the selected bar and percentage use quota colors; alternatives use theme-aware gray, and stale percentages say last known. Source and original provider slot identify each record. Expand a record for reset, synchronization, precision, window and scope details. Values are reconciled retained state, not raw response history. Event-driven reloads wait until close and then catch up. Preserve Escape/backdrop dismissal, focus restoration, existing quota selection and metadata-only output.
 - **Tones:** percent ≥ 70 → `progress-success`/`text-success`; ≥ 30 →
   warning; below → error. Unreported remains `progress-neutral` with muted
   text and adds `admin-static-unknown-progress`; it is never presented as a

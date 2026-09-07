@@ -1,0 +1,99 @@
+defmodule CodexPooler.Accounting.ReservationPolicyTest do
+  use CodexPooler.DataCase, async: false
+
+  alias CodexPooler.Access.APIKeyPolicyBinding
+  alias CodexPooler.Accounting.ReservationPolicy
+  alias CodexPooler.Catalog.Model
+  alias CodexPooler.Repo
+
+  import CodexPooler.PoolerFixtures
+
+  test "candidate policies are reloaded and scoped to the authenticated key and model" do
+    %{api_key: key} = active_api_key_fixture(pool_fixture())
+    %{api_key: other_key} = active_api_key_fixture(pool_fixture())
+    default = Repo.get_by!(APIKeyPolicyBinding, api_key_id: key.id, binding_scope: "default")
+    candidate = insert_policy(key, "sample-model")
+
+    foreign =
+      Repo.get_by!(APIKeyPolicyBinding, api_key_id: other_key.id, binding_scope: "default")
+
+    assert ReservationPolicy.policy_for_update(key, " SAMPLE-MODEL ", candidate).id ==
+             candidate.id
+
+    assert ReservationPolicy.policy_for_update(key, "different-model", candidate).id == default.id
+    assert ReservationPolicy.policy_for_update(key, "sample-model", foreign).id == candidate.id
+
+    candidate |> Ecto.Changeset.change(status: "disabled") |> Repo.update!()
+    assert ReservationPolicy.policy_for_update(key, "sample-model", candidate).id == default.id
+    assert ReservationPolicy.policy_for_update(key, nil, default).id == default.id
+
+    default |> Ecto.Changeset.change(status: "disabled") |> Repo.update!()
+    assert is_nil(ReservationPolicy.policy_for_update(key, nil, default))
+  end
+
+  test "effective model preserves explicit aliases before exposed and requested model fallback" do
+    model = %Model{exposed_model_id: "exposed-model"}
+
+    assert ReservationPolicy.effective_model(model, "requested", %{effective_model: "alias"}) ==
+             "alias"
+
+    assert ReservationPolicy.effective_model(model, "requested", %{"effective_model" => "alias"}) ==
+             "alias"
+
+    assert ReservationPolicy.effective_model(model, "requested", %{}) == "exposed-model"
+    assert ReservationPolicy.effective_model(%Model{}, "requested", %{}) == "requested"
+  end
+
+  test "request limits accept the exact boundary and reject input before output" do
+    policy = %APIKeyPolicyBinding{
+      max_input_tokens_per_request: 10,
+      max_output_tokens_per_request: 5
+    }
+
+    estimate = %{input_tokens: Decimal.new(10), output_tokens: Decimal.new(5), total_tokens: 15}
+    now = DateTime.utc_now()
+
+    assert :ok =
+             ReservationPolicy.enforce_reservation_limits(
+               %{id: Ecto.UUID.generate()},
+               policy,
+               estimate,
+               now
+             )
+
+    assert {:error, input_error} =
+             ReservationPolicy.enforce_reservation_limits(
+               nil,
+               policy,
+               %{estimate | input_tokens: 11, output_tokens: 6},
+               now
+             )
+
+    assert input_error.code == :api_key_policy_limit_exceeded
+    assert input_error.message =~ "max_input_tokens_per_request"
+
+    assert {:error, output_error} =
+             ReservationPolicy.enforce_reservation_limits(
+               nil,
+               policy,
+               %{estimate | output_tokens: 6},
+               now
+             )
+
+    assert output_error.message =~ "max_output_tokens_per_request"
+    assert :ok = ReservationPolicy.enforce_reservation_limits(nil, nil, estimate, now)
+  end
+
+  defp insert_policy(key, model) do
+    now = DateTime.utc_now()
+
+    Repo.insert!(%APIKeyPolicyBinding{
+      api_key_id: key.id,
+      binding_scope: "model",
+      model_identifier: model,
+      status: "active",
+      created_at: now,
+      updated_at: now
+    })
+  end
+end

@@ -82,7 +82,8 @@ __pycache__/
 .desloppify/
 scorecard.png
 .omo/
-output/imagegen/
+output/
+outputs/
 .claude/
 graphify-out/
 .planning/

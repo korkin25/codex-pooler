@@ -3,8 +3,10 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
 
   import CodexPooler.PoolerFixtures
 
+  alias CodexPooler.Alerts.Delivery.AttemptLifecycle
   alias CodexPooler.Alerts.Delivery.EmailDelivery
   alias CodexPooler.Alerts.Schemas.AlertDeliveryAttempt
+  alias CodexPooler.Jobs.AlertDeliveryWorker
   alias CodexPooler.Mailer
   alias CodexPooler.Repo
 
@@ -49,6 +51,81 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
              "SMTP TLS handshake failed; verify SSL/TLS mode and certificate settings"
 
     assert DateTime.compare(attempt.next_retry_at, DateTime.add(now, 60, :second)) == :eq
+  end
+
+  test "later notification retries use their own retry budget" do
+    pool = pool_fixture()
+    channel = alert_channel_fixture()
+    incident = alert_incident_fixture(pool: pool)
+    now = DateTime.utc_now()
+
+    for number <- 1..5 do
+      assert {:ok, _} =
+               AttemptLifecycle.insert_sent_attempt(
+                 incident,
+                 channel,
+                 number,
+                 DateTime.add(now, -3600, :second),
+                 %{}
+               )
+    end
+
+    args = %{"alert_incident_id" => incident.id, "alert_channel_id" => channel.id}
+
+    assert {:error, %{retryable: true}} =
+             AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 1})
+
+    id =
+      Repo.one!(
+        from attempt in AlertDeliveryAttempt,
+          where: attempt.incident_id == ^incident.id and attempt.attempt_number == 6,
+          select: attempt.id
+      )
+
+    attempt = Repo.get!(AlertDeliveryAttempt, id)
+    assert attempt.attempt_number == 6
+    assert attempt.max_attempts == 5
+    assert DateTime.diff(attempt.next_retry_at, attempt.completed_at, :second) == 60
+    assert :ok = AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 5})
+
+    terminal =
+      Repo.one!(
+        from row in AlertDeliveryAttempt,
+          where: row.incident_id == ^incident.id and row.attempt_number == 7
+      )
+
+    assert terminal.status == "failed"
+    refute terminal.retryable
+    assert terminal.next_retry_at == nil
+  end
+
+  test "sixth successful notification keeps its receipt" do
+    Application.put_env(:codex_pooler, Mailer, adapter: Swoosh.Adapters.Test)
+    pool = pool_fixture()
+    channel = alert_channel_fixture()
+    incident = alert_incident_fixture(pool: pool)
+    now = ~U[2026-09-07 12:00:00.000000Z]
+
+    for number <- 1..5 do
+      assert {:ok, _} =
+               AttemptLifecycle.insert_sent_attempt(
+                 incident,
+                 channel,
+                 number,
+                 DateTime.add(now, -3600, :second),
+                 %{}
+               )
+    end
+
+    assert {:ok, attempt} =
+             EmailDelivery.deliver_incident_to_channel(incident.id, channel.id, 6,
+               now: now,
+               retry_attempt: 1
+             )
+
+    assert attempt.status == "sent"
+    assert attempt.attempt_number == 6
+    assert Repo.get!(AlertDeliveryAttempt, attempt.id).status == "sent"
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

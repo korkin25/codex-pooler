@@ -51,7 +51,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
                "type" => "server_error"
              }
 
-      refute Jason.encode!(normalized_error) =~ internal_reason
+      refute CodexPooler.JSON.encode!(normalized_error) =~ internal_reason
     end
   end
 
@@ -794,7 +794,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
              "arguments" => arguments
            } = function_call
 
-    assert Jason.decode!(arguments) == %{"commands" => ["printf fixture"]}
+    assert CodexPooler.JSON.decode!(arguments) == %{"commands" => ["printf fixture"]}
 
     assert function_output == %{
              "type" => "function_call_output",
@@ -1205,15 +1205,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
   end
 
   @tag :responses_coercion
-  test "Images generation preserves latest and legacy model slugs in Responses payloads" do
-    for model <- ["gpt-image-2", "gpt-image-1"] do
+  test "Images generation preserves legacy model slugs in Responses payloads" do
+    for model <- ["gpt-image-1.5", "gpt-image-1"] do
       payload = %{
         "model" => model,
         "prompt" => "synthetic image request",
         "size" => "1024x1024",
         "quality" => "high",
         "background" => "opaque",
-        "input_fidelity" => "high",
         "n" => 1
       }
 

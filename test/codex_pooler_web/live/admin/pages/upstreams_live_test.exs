@@ -3846,7 +3846,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     limit_row_ids =
       Enum.reject(
         limit_ids,
-        &(String.ends_with?(&1, "-progress") or String.ends_with?(&1, "-reset"))
+        &(String.ends_with?(&1, "-progress") or String.ends_with?(&1, "-reset") or
+            String.contains?(&1, "-observations-"))
       )
 
     assert length(limit_row_ids) == 4
@@ -6396,6 +6397,25 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(view, "#upstream-account-#{identity.id}", "Async account after")
   end
 
+  test "defers upstream reloads while quota observations are open", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "quota-reading", name: "Quota reading"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Quota reading"})
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_quota_observations", %{})
+
+    assert {:ok, _event} =
+             Events.broadcast_upstreams(pool.id, "quota_windows_updated", %{
+               "upstream_identity_id" => identity.id
+             })
+
+    state = :sys.get_state(view.pid)
+    assert state.socket.assigns.upstreams_reload_dirty?
+    refute state.socket.assigns.upstreams_reload_running?
+    render_click(view, "close_quota_observations", %{})
+    _ = render_async(view)
+    refute :sys.get_state(view.pid).socket.assigns.upstreams_reload_dirty?
+  end
+
   test "defers an upstream event reload until the saved reset dialog closes", %{
     conn: conn,
     scope: scope
@@ -8028,7 +8048,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       Pools.create_pool(scope, %{slug: "auth-json-invalid", name: "auth.json Invalid"})
 
     sensitive_token = runtime_secret("auth-json-invalid")
-    invalid_auth_json = Jason.encode!(%{"OPENAI_API_KEY" => sensitive_token})
+    invalid_auth_json = CodexPooler.JSON.encode!(%{"OPENAI_API_KEY" => sensitive_token})
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
@@ -8062,7 +8082,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     personal_access_token = "at-admin-pat-do-not-render-#{System.unique_integer([:positive])}"
 
     unsupported_auth_json =
-      Jason.encode!(%{
+      CodexPooler.JSON.encode!(%{
         "auth_mode" => "personalAccessToken",
         "personalAccessToken" => personal_access_token
       })
@@ -8854,7 +8874,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       "tokens" => tokens,
       "last_refresh" => "2026-05-03T00:00:00Z"
     }
-    |> Jason.encode!()
+    |> CodexPooler.JSON.encode!()
   end
 
   defp id_token_fixture do
@@ -8870,7 +8890,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
   defp jwt_token(payload) do
     header = %{"alg" => "none", "typ" => "JWT"}
-    encode = &Base.url_encode64(Jason.encode!(&1), padding: false)
+    encode = &Base.url_encode64(CodexPooler.JSON.encode!(&1), padding: false)
 
     Enum.join([encode.(header), encode.(payload), Base.url_encode64("sig", padding: false)], ".")
   end

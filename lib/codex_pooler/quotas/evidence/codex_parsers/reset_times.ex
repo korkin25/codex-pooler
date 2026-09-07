@@ -57,9 +57,13 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers.ResetTimes do
     do: integer_or_nil(attrs["reset_after_seconds"] || attrs[:reset_after_seconds])
 
   defp reset_after_datetime(seconds, observed_at) when is_integer(seconds) and seconds >= 0 do
-    observed_at
-    |> DateTime.add(seconds, :second)
-    |> DateTime.truncate(:microsecond)
+    case DateTime.from_unix(
+           DateTime.to_unix(observed_at, :microsecond) + seconds * 1_000_000,
+           :microsecond
+         ) do
+      {:ok, _datetime} -> DateTime.add(observed_at, seconds, :second)
+      {:error, :invalid_unix_time} -> nil
+    end
   end
 
   defp reset_after_datetime(_seconds, _observed_at), do: nil
@@ -75,7 +79,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers.ResetTimes do
   end
 
   defp integer_or_nil(value) when is_integer(value), do: value
-  defp integer_or_nil(value) when is_float(value), do: trunc(value)
+  defp integer_or_nil(value) when is_float(value) and value >= 0, do: trunc(value)
 
   defp integer_or_nil(value) when is_binary(value) do
     case Integer.parse(String.trim(value)) do

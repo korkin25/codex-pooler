@@ -20,7 +20,16 @@ defmodule CodexPooler.Upstreams.EndpointMetadata do
   def endpoint_url(identity, assignment, endpoint, default \\ @default_base_url) do
     case base_url(identity, assignment, default) do
       base when is_binary(base) and base != "" ->
-        {:ok, normalize_base_url(base) <> endpoint}
+        base = normalize_base_url(base)
+
+        case URI.new(base) do
+          {:ok, %URI{scheme: scheme, host: host}}
+          when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+            {:ok, base <> endpoint}
+
+          _invalid ->
+            {:error, :invalid_upstream_base_url}
+        end
 
       _base ->
         {:error, :invalid_upstream_base_url}

@@ -37,6 +37,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
   end
 
   alias CodexPooler.Quotas.AdditionalMeterIdentity
+  alias CodexPooler.Quotas.WindowClassifier
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.WindowSelector
 
@@ -49,6 +50,29 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
     "codex_other",
     "gpt-5.3-codex-spark"
   ]
+
+  test "legacy weekly account slots normalize before descriptor selection without mutating input" do
+    legacy =
+      account_window(
+        window_kind: "primary",
+        window_minutes: 10_080,
+        reset_at: DateTime.add(@as_of, 7, :day)
+      )
+
+    canonical = %{legacy | window_kind: "secondary"}
+
+    for windows <- [[legacy, canonical], [canonical, legacy]] do
+      assert [selected] = WindowSelector.logical_windows(windows, @as_of)
+      assert selected.window_kind == "secondary"
+      assert WindowClassifier.weekly_secondary?(selected)
+      assert WindowSelector.best_account_window([selected], :weekly_secondary, @as_of) == selected
+      assert WindowSelector.best_account_primary_variant([selected], @as_of) == nil
+    end
+
+    assert legacy.window_kind == "primary"
+    assert WindowSelector.best_account_window([], :primary_5h, @as_of) == nil
+    assert WindowSelector.logical_windows([], @as_of) == []
+  end
 
   test "prefers measured account evidence over a later zero-capacity usage outlier" do
     outlier =

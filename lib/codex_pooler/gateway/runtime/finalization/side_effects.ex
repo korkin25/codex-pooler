@@ -58,10 +58,22 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
   end
 
   @spec observe_http_response(SelectedCandidateContext.t(), Req.Response.t(), binary()) :: :ok
-  def observe_http_response(%SelectedCandidateContext{identity: identity}, response, body) do
-    RateLimitObserver.record_headers(identity, response)
+  def observe_http_response(
+        %SelectedCandidateContext{identity: identity} = context,
+        response,
+        body
+      ) do
+    RateLimitObserver.record_headers(identity, response, context.model.upstream_model_id)
     RateLimitObserver.record_error(identity, body)
-    observe_provider_rejection(identity, response.headers, body, response.status)
+
+    observe_provider_rejection(
+      identity,
+      response.headers,
+      body,
+      response.status,
+      context.model.upstream_model_id
+    )
+
     :ok
   end
 
@@ -72,12 +84,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
           map() | nil
         ) :: :ok
   def observe_stream_response(
-        %SelectedCandidateContext{identity: identity},
+        %SelectedCandidateContext{identity: identity} = context,
         response,
         body,
         state
       ) do
-    RateLimitObserver.record_headers(identity, response)
+    RateLimitObserver.record_headers(identity, response, context.model.upstream_model_id)
 
     rate_limit_state =
       if is_map(state) do
@@ -88,21 +100,33 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
       end
 
     RateLimitObserver.commit_events(identity, rate_limit_state)
-    observe_provider_rejection(identity, response.headers, body, response.status)
+
+    observe_provider_rejection(
+      identity,
+      response.headers,
+      body,
+      response.status,
+      context.model.upstream_model_id
+    )
 
     :ok
   end
 
   @spec observe_websocket_response(SelectedCandidateContext.t(), map()) :: :ok
-  def observe_websocket_response(%SelectedCandidateContext{identity: identity}, response) do
+  def observe_websocket_response(
+        %SelectedCandidateContext{identity: identity} = context,
+        response
+      ) do
     RateLimitObserver.record_websocket_upgrade_headers(
       identity,
-      websocket_upgrade_headers(response)
+      websocket_upgrade_headers(response),
+      context.model.upstream_model_id
     )
 
     RateLimitObserver.record_websocket_frame_headers(
       identity,
-      Map.get(response, :websocket_frame_headers, %{})
+      Map.get(response, :websocket_frame_headers, %{}),
+      context.model.upstream_model_id
     )
 
     headers =
@@ -115,18 +139,24 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
         _response -> Map.get(response, :status, 101)
       end
 
-    observe_provider_rejection(identity, headers, Map.get(response, :body, ""), status)
+    observe_provider_rejection(
+      identity,
+      headers,
+      Map.get(response, :body, ""),
+      status,
+      context.model.upstream_model_id
+    )
 
     :ok
   end
 
   # A header marker on a successful response is only a diagnostic. Persist a
   # rejection fact only after an actual HTTP error or parsed failed terminal.
-  defp observe_provider_rejection(identity, headers, body, status) do
+  defp observe_provider_rejection(identity, headers, body, status, dispatched_model) do
     code = provider_failure_code(body, status)
 
     if quota_rejection?(status, code, headers) do
-      RateLimitObserver.record_provider_rejection(identity, headers, body)
+      RateLimitObserver.record_provider_rejection(identity, headers, body, dispatched_model)
     end
 
     :ok
@@ -140,7 +170,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
   end
 
   defp http_error_code(body, status) when is_integer(status) and status >= 400 do
-    case Jason.decode(body) do
+    case CodexPooler.JSON.decode(body) do
       {:ok, %{"error" => %{"code" => code}}} -> code
       _not_json -> nil
     end

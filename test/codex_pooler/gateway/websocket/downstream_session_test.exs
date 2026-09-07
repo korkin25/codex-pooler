@@ -18,6 +18,14 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSessionTest do
 
   @remote_node :"codex_pooler@remote-detach-owner.example"
 
+  test "malformed JSON never retargets an attached downstream" do
+    state = %{websocket_owner_downstream: %{}}
+
+    for payload <- ["{", "{invalid}", ~S({"value":"\uD800"})] do
+      assert {:ok, ^state} = DownstreamSession.maybe_retarget_before_start(payload, state)
+    end
+  end
+
   setup do
     setup = accounting_setup()
 
@@ -217,6 +225,22 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSessionTest do
     assert Repo.get!(Attempt, http_turn.attempt.id).status == "in_progress"
     assert Repo.get!(CodexTurn, http_turn.turn.id).status == "in_progress"
     assert_lease_preserved!(fixture)
+
+    owner_log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok = GenServer.stop(fixture.owner_pid)
+      end)
+
+    assert owner_log =~ "websocket owner exit persistence failed"
+    assert owner_log =~ "operation=interrupt_codex_session"
+    assert owner_log =~ "reason_class=stale_owner_cleanup"
+    assert Repo.get!(Request, http_turn.request.id).status == "in_progress"
+    assert Repo.get!(Attempt, http_turn.attempt.id).status == "in_progress"
+    assert Repo.get!(CodexTurn, http_turn.turn.id).status == "in_progress"
+    assert Repo.get!(BridgeOwnerLease, fixture.owner_lease.id).status == "active"
+
+    assert Repo.get!(CodexSession, fixture.session.id).owner_lease_token ==
+             fixture.owner_lease.lease_token
   end
 
   test "successful detach preserves a failed terminal winner and its single settlement",

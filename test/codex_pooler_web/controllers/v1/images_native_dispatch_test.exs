@@ -63,8 +63,10 @@ defmodule CodexPoolerWeb.V1.ImagesNativeDispatchTest do
 
     assert coerced.endpoint == "/backend-api/codex/responses"
     assert [%{"content" => content}] = coerced.payload["input"]
-    assert Enum.count(content, &(&1["type"] == "input_image")) == 2
-    assert [%{"type" => "image_generation"}] = coerced.payload["tools"]
+    assert Enum.count(content, &(&1["type"] == "input_image")) == 1
+
+    assert [%{"type" => "image_generation", "input_image_mask" => %{"image_url" => _}}] =
+             coerced.payload["tools"]
   end
 
   defp png do
@@ -108,6 +110,7 @@ defmodule CodexPoolerWeb.V1.ImagesNativeDispatchTest do
         "model" => "gpt-image-2",
         "prompt" => "synthetic image",
         "quality" => "medium",
+        "background" => "opaque",
         "size" => "1536x1024",
         "n" => 1
       }
@@ -133,7 +136,15 @@ defmodule CodexPoolerWeb.V1.ImagesNativeDispatchTest do
       assert response.status == 200
       assert [captured] = FakeUpstream.requests(upstream)
       assert captured.path == "/backend-api/codex/images/#{@operation}"
-      assert captured.json["model"] == "gpt-image-2"
+
+      assert %{
+               "model" => "gpt-image-2",
+               "quality" => "medium",
+               "size" => "1536x1024",
+               "background" => "opaque",
+               "n" => 1
+             } = captured.json
+
       refute Map.has_key?(captured.json, "tools")
       refute Map.has_key?(captured.json, "stream")
       assert [request] = Repo.all(Request)

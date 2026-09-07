@@ -7,7 +7,7 @@ defmodule CodexPooler.Platform.DNSClusterResolver do
   @spec basename(node()) :: String.t()
   def basename(node_name), do: DNSCluster.Resolver.basename(node_name)
 
-  @spec connect_node(node()) :: boolean()
+  @spec connect_node(node()) :: boolean() | :ignored
   def connect_node(node_name), do: DNSCluster.Resolver.connect_node(node_name)
 
   @spec list_nodes() :: [node()]
@@ -24,12 +24,13 @@ defmodule CodexPooler.Platform.DNSClusterResolver do
   def reject_current_pod_ip(records) do
     case System.get_env("POD_IP") do
       pod_ip when is_binary(pod_ip) and pod_ip != "" ->
-        Enum.reject(records, &(record_to_string(&1) == pod_ip))
+        case :inet.parse_address(String.to_charlist(pod_ip)) do
+          {:ok, address} -> Enum.reject(records, &(&1 == address))
+          {:error, :einval} -> records
+        end
 
       _missing_or_empty ->
         records
     end
   end
-
-  defp record_to_string(record), do: record |> :inet.ntoa() |> to_string()
 end

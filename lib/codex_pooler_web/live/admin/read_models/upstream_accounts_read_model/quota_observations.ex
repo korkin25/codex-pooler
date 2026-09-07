@@ -1,66 +1,154 @@
 defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
-  @moduledoc "Optional raw diagnostics beside the authoritative Usage API quota view."
+  @moduledoc false
 
-  alias CodexPooler.Quotas.Evidence
-  alias CodexPooler.Quotas.SourceObservations
+  alias CodexPooler.Quotas.{AdditionalMeterIdentity, Evidence, SourceObservations}
 
   defdelegate key(window), to: SourceObservations
+  alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.WindowSelector
+  alias CodexPoolerWeb.DateTimeDisplay
 
-  def attach(rows, raw_windows, as_of) do
-    groups = SourceObservations.groups(raw_windows, as_of)
+  @sources %{
+    "codex_usage_api" => "Usage API",
+    "codex_response_headers" => "Response headers",
+    "codex_rate_limit_event" => "Rate-limit event",
+    "codex_rate_limit_error" => "Rate-limit error"
+  }
 
-    Enum.map(rows, &attach_row(&1, groups, as_of))
+  @type observation :: %{
+          key: String.t(),
+          source: String.t(),
+          slot: String.t(),
+          used: String.t(),
+          remaining: String.t(),
+          remaining_value: float() | nil,
+          observed_at: String.t(),
+          reset_at: String.t(),
+          freshness: String.t(),
+          elapsed?: boolean(),
+          selected?: boolean(),
+          details: [{String.t(), String.t()}]
+        }
+
+  @spec group_key(AccountQuotaWindow.t()) :: String.t()
+  def group_key(%AccountQuotaWindow{window_kind: "primary", window_minutes: 10_080} = window),
+    do: group_key(%{window | window_kind: "secondary"})
+
+  def group_key(window) do
+    fingerprint({WindowSelector.logical_key(window), AdditionalMeterIdentity.token(window)})
   end
 
-  defp attach_row(row, groups, as_of) do
-    windows = Map.get(groups, Map.get(row, :evidence_key), [])
-    disagreement? = SourceObservations.disagreement?(windows, as_of, :usage)
-    reset_disagreement? = SourceObservations.disagreement?(windows, as_of, :reset)
-
-    row
-    |> Map.put(:observations, observations(windows, as_of))
-    |> Map.put(:source_disagreement, disagreement?)
-    |> Map.put(:reset_disagreement, reset_disagreement?)
-    |> Map.put(:selected_percent_label, row.percent_label)
-    |> Map.update!(:label, &scope_label(row.key, &1))
+  @spec project(AccountQuotaWindow.t(), DateTimeDisplay.preferences(), DateTime.t()) ::
+          observation()
+  def project(window, preferences, as_of) do
+    %{
+      key: fingerprint({window.id, window.source, window.observed_at, window.reset_at}),
+      source: Map.get(@sources, window.source, "Other source"),
+      slot: allowed(window.window_kind, ~w(primary secondary)),
+      used: percent(window.used_percent),
+      remaining: remaining(window.used_percent),
+      remaining_value: remaining_value(window.used_percent),
+      observed_at: timestamp(window.observed_at, preferences),
+      reset_at: timestamp(window.reset_at, preferences),
+      freshness: Evidence.current_freshness_state(window, as_of),
+      elapsed?:
+        match?(%DateTime{}, window.reset_at) and DateTime.compare(window.reset_at, as_of) != :gt,
+      selected?: true,
+      details: [
+        {"Reset reported", timestamp(window.reset_at, preferences)},
+        {"Last synchronized", timestamp(window.last_sync_at, preferences)},
+        {"Source precision",
+         allowed(window.source_precision, ~w(authoritative observed inferred unknown))},
+        {"Window", window_duration(window.window_minutes)},
+        {"Reported slot", allowed(window.window_kind, ~w(primary secondary))},
+        {"Scope", allowed(window.quota_scope, ~w(account model upstream_model feature))},
+        {"Window state", window_state(window.reset_at, as_of)},
+        {"Reported model", reported_model(window)}
+      ]
+    }
   end
 
-  defp scope_label(:weekly, label), do: "Account #{label}"
+  @spec attach([map()], [AccountQuotaWindow.t()], DateTimeDisplay.preferences(), DateTime.t()) ::
+          [map()]
+  def attach(rows, windows, preferences, as_of) do
+    groups =
+      windows
+      |> Enum.filter(&(DateTime.compare(&1.observed_at, as_of) != :gt))
+      |> Enum.sort_by(&{-DateTime.to_unix(&1.observed_at, :microsecond), &1.source, &1.id})
+      |> Enum.group_by(&group_key/1)
 
-  defp scope_label(_key, label), do: label
+    Enum.map(rows, fn row ->
+      case Map.get(row, :observations, []) do
+        [selected] ->
+          observations =
+            groups
+            |> Map.get(row.observation_group, [])
+            |> Enum.map(&project(&1, preferences, as_of))
+            |> Enum.map(&%{&1 | selected?: &1.key == selected.key})
+            |> Enum.sort_by(&(not &1.selected?))
 
-  defp observations(windows, as_of) do
-    windows
-    |> Enum.sort_by(&{&1.source || "", iso8601(&1.observed_at), iso8601(&1.reset_at)})
-    |> Enum.map(fn window ->
-      %{
-        source: window.source || "source not reported",
-        observed_at: iso8601(window.observed_at),
-        reset_at: iso8601(window.reset_at),
-        freshness: Evidence.current_freshness_state(window, as_of),
-        elapsed: Evidence.expired?(window, as_of),
-        used: percent(window.used_percent),
-        remaining: remaining(window.used_percent),
-        descriptor: descriptor(window)
-      }
+          row
+          |> Map.put(:observations, observations)
+          |> attach_diagnostics(Map.get(groups, row.observation_group, []), as_of)
+
+        [] ->
+          attach_diagnostics(row, [], as_of)
+      end
     end)
   end
 
-  defp descriptor(window) do
-    [
-      window.model,
-      window.upstream_model,
-      Map.get(window.metadata || %{}, "normal_model_slug")
-    ]
+  defp attach_diagnostics(row, windows, as_of) do
+    row
+    |> Map.put(:source_disagreement, SourceObservations.disagreement?(windows, as_of, :usage))
+    |> Map.put(:reset_disagreement, SourceObservations.disagreement?(windows, as_of, :reset))
+    |> Map.put(:selected_percent_label, row.percent_label)
+  end
+
+  defp reported_model(window) do
+    [window.model, window.upstream_model, Map.get(window.metadata || %{}, "normal_model_slug")]
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
     |> Enum.join(" · ")
   end
 
-  defp percent(%Decimal{} = value), do: "#{Decimal.to_string(value, :normal)}%"
-  defp percent(_value), do: "not reported"
-  defp remaining(%Decimal{} = used), do: percent(Decimal.sub(100, used))
-  defp remaining(_used), do: "not reported"
-  defp iso8601(%DateTime{} = time), do: DateTime.to_iso8601(time)
-  defp iso8601(_time), do: "not reported"
+  defp fingerprint(value) do
+    value
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp percent(%Decimal{} = value), do: "#{Decimal.to_string(Decimal.normalize(value), :normal)}%"
+  defp percent(_value), do: "Not reported"
+  defp remaining(%Decimal{} = value), do: percent(Decimal.sub(Decimal.new(100), value))
+  defp remaining(_value), do: "Not reported"
+
+  defp remaining_value(%Decimal{} = value),
+    do: value |> then(&Decimal.sub(Decimal.new(100), &1)) |> Decimal.to_float()
+
+  defp remaining_value(_value), do: nil
+
+  defp timestamp(%DateTime{} = value, preferences),
+    do: DateTimeDisplay.format_datetime(value, preferences)
+
+  defp timestamp(_value, _preferences), do: "Not reported"
+
+  defp allowed(value, values),
+    do: if(value in values, do: String.replace(value, "_", " "), else: "Not reported")
+
+  defp window_duration(minutes)
+       when is_integer(minutes) and minutes > 0 and rem(minutes, 1440) == 0,
+       do: "#{div(minutes, 1440)} days"
+
+  defp window_duration(minutes)
+       when is_integer(minutes) and minutes > 0 and rem(minutes, 60) == 0,
+       do: "#{div(minutes, 60)} hours"
+
+  defp window_duration(minutes) when is_integer(minutes) and minutes > 0, do: "#{minutes} minutes"
+  defp window_duration(_minutes), do: "Not reported"
+
+  defp window_state(%DateTime{} = reset_at, as_of),
+    do: if(DateTime.compare(reset_at, as_of) == :gt, do: "not elapsed", else: "elapsed")
+
+  defp window_state(_reset_at, _as_of), do: "Not reported"
 end

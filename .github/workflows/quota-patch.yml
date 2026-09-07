@@ -11,7 +11,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    container: elixir:1.20.2-otp-28-slim@sha256:274bde8ed2003aa8ec03fe0b1796d40d4099c16dc9a20d5eae0f12bb22443225
+    container:
+      image: elixir:1.20.4-otp-29-slim@sha256:c7af3280a23beafb9c9113b676466c7bb3b7d9671c8af96889a0eaad0b424bec
+      options: --init
     services:
       postgres:
         image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
@@ -31,7 +33,7 @@ jobs:
       - name: Install test tools and locked dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential ca-certificates git nodejs npm curl procps
+          apt-get install -y --no-install-recommends build-essential ca-certificates git nodejs npm curl procps ripgrep
           mix local.hex --force
           mix local.rebar --force
           mix deps.get
@@ -46,6 +48,12 @@ jobs:
           mix assets.setup
           mix assets.build
           make test-fast N=4 TEST_FAST_LOGICAL_CPUS=4
+      - name: Required Unix lifecycle integration profile
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends docker-cli docker-compose lsof python3 util-linux
+          docker compose version
+          mix test --warnings-as-errors --only unix_integration
 
   image:
     needs: verify
@@ -62,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(cat VERSION)
-          [[ "$version" =~ ^0\.7\.1-kk\.[1-9][0-9]*$ ]]
+          [[ "$version" =~ ^0\.7\.3-kk\.[1-9][0-9]*$ ]]
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           {
             echo "version=$version"
@@ -98,7 +106,7 @@ jobs:
             org.opencontainers.image.licenses=Elastic-2.0
             org.opencontainers.image.description=Modified Codex Pooler quota evidence display; see /app/FORK.md
             org.opencontainers.image.base.source=https://github.com/icoretech/codex-pooler
-            info.quota-patch.upstream.revision=b2d025c7430faab3fdb1ef503b5ba701536bd9f8
+            info.quota-patch.upstream.revision=8ae4595fc9d5f09eb9e185476d51d7add6180ccd
       - name: Verify manifest, source labels and packaged notices
         env:
           IMAGE: ${{ steps.identity.outputs.image }}

@@ -52,6 +52,33 @@ defmodule CodexPooler.Upstreams.EndpointMetadataTest do
     end
   end
 
+  test "rejects malformed HTTP bases before a transport can raise" do
+    for base <- [
+          "not-a-url",
+          "   ",
+          "https://",
+          "ftp://example.com",
+          "https://example.com:bad",
+          42
+        ] do
+      assert EndpointMetadata.endpoint_url(
+               identity(%{}),
+               assignment(%{"base_url" => base}),
+               "/backend-api/codex/models"
+             ) == {:error, :invalid_upstream_base_url}
+    end
+  end
+
+  test "retains valid HTTP bases including loopback, IPv6, ports and path prefixes" do
+    for base <- ["http://127.0.0.1:4000", "http://[::1]:4000", "https://example.com/prefix"] do
+      assert EndpointMetadata.endpoint_url(
+               identity(%{}),
+               assignment(%{"base_url" => " #{base}/backend-api/ "}),
+               "/backend-api/codex/models"
+             ) == {:ok, base <> "/backend-api/codex/models"}
+    end
+  end
+
   defp identity(metadata), do: %UpstreamIdentity{metadata: metadata}
   defp assignment(metadata), do: %PoolUpstreamAssignment{metadata: metadata}
 end

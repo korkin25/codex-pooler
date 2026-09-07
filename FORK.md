@@ -6,6 +6,15 @@ https://github.com/icoretech/codex-pooler at
 Elastic License 2.0 (`LICENSE.md`) are retained. This fork is maintained at
 https://github.com/korkin25/codex-pooler and is not an upstream release.
 
+From `0.7.3-kk.2`, draining rejects new provider HTTP admission before granting
+or queueing work. Native clients receive HTTP 503 with `server_is_overloaded`;
+the rejection creates no request, attempt or ledger entry. Already admitted
+streams and pre-drain queue entries retain their leases and finish under the
+existing bounded shutdown policy. WebSocket owner draining, browser and MCP
+admission are unchanged. This closes late HTTP admission after readiness
+withdrawal; it does not migrate streams or guarantee completion beyond the
+configured drain and endpoint shutdown deadlines.
+
 Version series `0.7.3-kk.N` adopts upstream 0.7.3 and retains the following
 quota changes introduced in `0.7.1-kk.N`:
 

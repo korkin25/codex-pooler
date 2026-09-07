@@ -1,7 +1,7 @@
 ARG DEBIAN_MIRROR=
 ARG DEBIAN_SECURITY_MIRROR=
 
-FROM node:26.8.1-slim AS assets_deps
+FROM node:26.8.1-slim@sha256:c0753125a3789977aefe869cbebccf70e3cfd7ea84ca48547458f02e4f1d7146 AS assets_deps
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 
@@ -10,7 +10,7 @@ WORKDIR /app
 COPY assets/package.json assets/package-lock.json ./assets/
 RUN npm ci --prefix assets
 
-FROM elixir:1.20.2-otp-28-slim AS builder
+FROM elixir:1.20.2-otp-28-slim@sha256:274bde8ed2003aa8ec03fe0b1796d40d4099c16dc9a20d5eae0f12bb22443225 AS builder
 
 ARG DEBIAN_MIRROR
 ARG DEBIAN_SECURITY_MIRROR
@@ -62,7 +62,7 @@ RUN mix compile --warnings-as-errors \
   && mix assets.deploy \
   && mix release
 
-FROM debian:trixie-slim AS app
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS app
 
 ARG DEBIAN_MIRROR
 ARG DEBIAN_SECURITY_MIRROR
@@ -98,6 +98,8 @@ RUN for file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
   && useradd --system --gid codex_pooler --home-dir /app --shell /usr/sbin/nologin codex_pooler
 
 COPY --from=builder --chown=codex_pooler:codex_pooler /app/_build/prod/rel/codex_pooler ./
+
+COPY --chown=codex_pooler:codex_pooler LICENSE.md FORK.md VERSION ./
 
 USER codex_pooler
 

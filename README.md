@@ -1,3 +1,6 @@
+> **Modified distribution:** quota evidence display fixes on upstream 0.7.1.
+> See [FORK.md](FORK.md) for provenance, behavior and release validation.
+
 <h1 align="center">Codex Pooler</h1>
 
 <p align="center">

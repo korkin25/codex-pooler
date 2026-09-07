@@ -1,0 +1,125 @@
+name: Quota patch verification and image
+
+on:
+  push:
+    branches: [fork/quota-release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container: elixir:1.20.2-otp-28-slim@sha256:274bde8ed2003aa8ec03fe0b1796d40d4099c16dc9a20d5eae0f12bb22443225
+    services:
+      postgres:
+        image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      MIX_ENV: test
+      ERL_AFLAGS: '+S 2:2 +JMsingle true'
+      CODEX_POOLER_TEST_POSTGRES_HOST: postgres
+      CODEX_POOLER_TEST_POSTGRES_PORT: '5432'
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install test tools and locked dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates git nodejs npm curl procps
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+      - name: Formatting, compilation, architecture and lint
+        run: |
+          mix format --check-formatted
+          mix compile --warnings-as-errors
+          mix quality.xref
+          mix credo --strict
+      - name: Assets and full upstream test suite
+        run: |
+          mix assets.setup
+          mix assets.build
+          make test-fast N=4 TEST_FAST_LOGICAL_CPUS=4
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Prepare immutable release identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cat VERSION)
+          [[ "$version" =~ ^0\.7\.1-kk\.[1-9][0-9]*$ ]]
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$image:$version-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reject an existing immutable tag
+        env:
+          IMAGE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+            echo 'Immutable tag already exists; refusing overwrite.' >&2
+            exit 1
+          fi
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        id: build
+        with:
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.identity.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.identity.outputs.version }}
+            org.opencontainers.image.licenses=Elastic-2.0
+            org.opencontainers.image.description=Modified Codex Pooler quota evidence display; see /app/FORK.md
+            org.opencontainers.image.base.source=https://github.com/icoretech/codex-pooler
+            info.quota-patch.upstream.revision=b2d025c7430faab3fdb1ef503b5ba701536bd9f8
+      - name: Verify manifest, source labels and packaged notices
+        env:
+          IMAGE: ${{ steps.identity.outputs.image }}
+          IMAGE_TAG: ${{ steps.identity.outputs.tag }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE_TAG" --raw > image-manifest.json
+          test "sha256:$(sha256sum image-manifest.json | cut -d' ' -f1)" = "$IMAGE_DIGEST"
+          docker pull "$IMAGE@$IMAGE_DIGEST"
+          docker image inspect "$IMAGE@$IMAGE_DIGEST" --format '{{json .Config.Labels}}' > image-labels.json
+          jq -e --arg sha "$GITHUB_SHA" --arg version "$IMAGE_VERSION" \
+            '.["org.opencontainers.image.revision"] == $sha and .["org.opencontainers.image.version"] == $version' image-labels.json
+          docker run --rm --network none --entrypoint /bin/sh "$IMAGE@$IMAGE_DIGEST" \
+            -ec 'test -s /app/LICENSE.md && test -s /app/FORK.md && test -s /app/VERSION'
+          printf 'IMAGE_TAG=%s\nIMAGE_DIGEST=%s\nIMAGE_SOURCE_SHA=%s\n' "$IMAGE_TAG" "$IMAGE_DIGEST" "$GITHUB_SHA" > image.env
+          cat image.env >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quota-image-provenance
+          path: |
+            image.env
+            image-manifest.json
+            image-labels.json

@@ -1,7 +1,7 @@
 defmodule CodexPooler.Gateway.Transports.AdmissionTest do
   use CodexPooler.DataCase, async: false
 
-  alias CodexPooler.Gateway.OperationalSettings
+  alias CodexPooler.Gateway.{OperationalSettings, OperationalStatus}
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.InstanceSettings
   alias CodexPooler.InstanceSettings.Settings
@@ -71,6 +71,110 @@ defmodule CodexPooler.Gateway.Transports.AdmissionTest do
              Admission.acquire("proxy_http", %{request_id: "second-http"})
 
     Admission.release(lease)
+  end
+
+  test "drain blocks new HTTP gateway work while preserving browser MCP and websocket admission" do
+    marker = drain_marker()
+    File.write!(marker, "")
+
+    unaffected = [RouteClass.admin_browser(), RouteClass.mcp(), RouteClass.proxy_websocket()]
+
+    for route_class <- Admission.route_classes() -- unaffected do
+      assert {:error, %{code: "rollout_draining", route_class: ^route_class}} =
+               Admission.acquire(route_class)
+    end
+
+    for route_class <- unaffected do
+      assert {:ok, lease} = Admission.acquire(route_class)
+      Admission.release(lease)
+    end
+
+    assert {:error,
+            %{
+              status: 503,
+              code: "server_is_overloaded",
+              internal_reason: "rollout_draining",
+              accounting_disposition: :zero_work
+            }} = Admission.run("proxy_stream", %{}, fn -> flunk("work ran during drain") end)
+  end
+
+  test "drain is checked when a pending admission call is processed" do
+    marker = drain_marker()
+    :sys.suspend(Admission)
+    on_exit(fn -> :sys.resume(Admission) end)
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        # Sending the call and barrier from the same process preserves mailbox order.
+        ref =
+          :gen_server.send_request(
+            Admission,
+            {:acquire, "proxy_http", %{}, OperationalSettings.current(), Admission}
+          )
+
+        send(parent, :admission_sent)
+        :gen_server.wait_response(ref, 1_000)
+      end)
+
+    assert_receive :admission_sent
+    File.write!(marker, "")
+    :sys.resume(Admission)
+    assert {:reply, {:error, %{code: "rollout_draining"}}} = Task.await(task, 1_000)
+    assert {:ok, %{"proxy_http" => %{running: 0, queued: 0}}} = Admission.saturation()
+  end
+
+  test "pre-drain queued work finishes while later arrivals are rejected" do
+    marker = drain_marker()
+    setup_settings(settings_with_queues())
+    attach_telemetry()
+    assert {:ok, held} = Admission.acquire("proxy_stream")
+    queued = Task.async(fn -> Admission.acquire("proxy_stream") end)
+
+    assert_receive {:admission_event, [:codex_pooler, :gateway, :admission, :enqueued],
+                    _measurements, %{route_class: "proxy_stream"}}
+
+    File.write!(marker, "")
+    assert {:error, %{code: "rollout_draining"}} = Admission.acquire("proxy_stream")
+    assert {:ok, %{"proxy_stream" => %{running: 1, queued: 1}}} = Admission.saturation()
+    Admission.release(held)
+    assert {:ok, lease} = Task.await(queued, 1_000)
+    Admission.release(lease)
+  end
+
+  test "an admitted stream keeps its lease until its callback completes during drain" do
+    marker = drain_marker()
+
+    stream = fn conn ->
+      assert File.exists?(marker)
+      assert {:ok, %{"proxy_stream" => %{running: 1}}} = Admission.saturation()
+      conn
+    end
+
+    assert {:ok, %{stream: admitted}} =
+             CodexPooler.Gateway.Admission.run_admitted("proxy_stream", %{}, fn ->
+               {:ok, %{stream: stream}}
+             end)
+
+    File.write!(marker, "")
+    assert :completed = admitted.(:completed)
+    assert {:ok, %{"proxy_stream" => %{running: 0, queued: 0}}} = Admission.saturation()
+  end
+
+  defp drain_marker do
+    old = Application.get_env(:codex_pooler, OperationalStatus)
+    path = Path.join(System.tmp_dir!(), "http-drain-#{System.unique_integer([:positive])}")
+    Application.put_env(:codex_pooler, OperationalStatus, drain_marker_path: path)
+
+    on_exit(fn ->
+      File.rm(path)
+
+      if old,
+        do: Application.put_env(:codex_pooler, OperationalStatus, old),
+        else: Application.delete_env(:codex_pooler, OperationalStatus)
+    end)
+
+    path
   end
 
   test "unknown route class errors are returned as sanitized overload responses" do

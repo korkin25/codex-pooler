@@ -4,7 +4,7 @@ defmodule CodexPoolerWeb.Runtime.GatewayAdmissionTest do
   import CodexPooler.PoolerFixtures
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
-  alias CodexPooler.Gateway.OperationalSettings
+  alias CodexPooler.Gateway.{OperationalSettings, OperationalStatus}
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.Repo
 
@@ -102,6 +102,50 @@ defmodule CodexPoolerWeb.Runtime.GatewayAdmissionTest do
     assert Repo.aggregate(LedgerEntry, :count) == 0
 
     Admission.release(lease)
+  end
+
+  test "draining HTTP and SSE requests return retriable zero-work errors", %{conn: conn} do
+    old = Application.get_env(:codex_pooler, OperationalStatus)
+    marker = Path.join(System.tmp_dir!(), "gateway-drain-#{System.unique_integer([:positive])}")
+    Application.put_env(:codex_pooler, OperationalStatus, drain_marker_path: marker)
+    File.write!(marker, "")
+
+    on_exit(fn ->
+      File.rm(marker)
+
+      if old,
+        do: Application.put_env(:codex_pooler, OperationalStatus, old),
+        else: Application.delete_env(:codex_pooler, OperationalStatus)
+    end)
+
+    setup = active_api_key_fixture()
+
+    for stream? <- [false, true] do
+      response =
+        conn
+        |> recycle()
+        |> put_req_header("authorization", setup.authorization)
+        |> post(~p"/backend-api/codex/responses", %{
+          "model" => "gpt-test",
+          "input" => "synthetic drain",
+          "stream" => stream?
+        })
+
+      assert %{
+               "error" => %{
+                 "code" => "server_is_overloaded",
+                 "type" => "server_error",
+                 "message" => "gateway is draining for shutdown"
+               }
+             } = json_response(response, 503)
+
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+      assert Repo.aggregate(LedgerEntry, :count) == 0
+    end
+
+    assert %{"authenticated" => false} =
+             json_response(get(build_conn(), ~p"/session?optional=1"), 200)
   end
 
   defp settings do

@@ -5,10 +5,18 @@ defmodule CodexPooler.Gateway.Transports.Admission do
 
   use GenServer
 
-  alias CodexPooler.Gateway.OperationalSettings
+  alias CodexPooler.Gateway.{OperationalSettings, OperationalStatus}
   alias CodexPooler.RouteClass
 
   @route_classes RouteClass.all()
+  @http_gateway_classes [
+    RouteClass.proxy_http(),
+    RouteClass.proxy_control(),
+    RouteClass.proxy_stream(),
+    RouteClass.proxy_compact(),
+    RouteClass.file_upload(),
+    RouteClass.audio_transcription()
+  ]
 
   @default_queue_timeout_ms 5_000
   @telemetry_prefix [:codex_pooler, :gateway, :admission]
@@ -127,6 +135,19 @@ defmodule CodexPooler.Gateway.Transports.Admission do
     class = class_state(state, route_class)
 
     cond do
+      route_class in @http_gateway_classes and OperationalStatus.draining?() ->
+        # Check in the serialized admission decision, before granting or queueing
+        # new work. Existing leases and pre-drain queue entries finish normally.
+        emit(
+          :rejected,
+          route_class,
+          metadata,
+          %{queued: :queue.len(class.queue)},
+          "rollout_draining"
+        )
+
+        {:reply, {:error, %{code: "rollout_draining", route_class: route_class}}, state}
+
       class.running < config.max_concurrency ->
         lease = lease(server, route_class)
         class = track_active_lease(class, lease, from)
@@ -375,6 +396,18 @@ defmodule CodexPooler.Gateway.Transports.Admission do
     }
   end
 
+  defp error(%{code: "rollout_draining", route_class: route_class}) do
+    %{
+      status: 503,
+      code: @overload_code,
+      message: "gateway is draining for shutdown",
+      param: nil,
+      route_class: route_class,
+      internal_reason: "rollout_draining",
+      accounting_disposition: :zero_work
+    }
+  end
+
   defp error(%{code: code, route_class: route_class}) when code in @bulkhead_reasons do
     %{
       status: 503,
@@ -411,7 +444,7 @@ defmodule CodexPooler.Gateway.Transports.Admission do
   end
 
   defp maybe_put_internal_reason(metadata, internal_reason)
-       when internal_reason in @bulkhead_reasons,
+       when internal_reason in @bulkhead_reasons or internal_reason == "rollout_draining",
        do: Map.put(metadata, :internal_reason, internal_reason)
 
   defp maybe_put_internal_reason(metadata, _internal_reason), do: metadata

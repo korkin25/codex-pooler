@@ -250,6 +250,15 @@ defmodule CodexPooler.Jobs.UpstreamEnqueue do
     end
   end
 
+  @spec enqueue_quota_source_reconciliation(PoolUpstreamAssignment.t()) :: job_insert_result()
+  def enqueue_quota_source_reconciliation(%PoolUpstreamAssignment{} = assignment) do
+    enqueue_automatic_identity_account_reconciliation(
+      assignment.pool_id,
+      assignment,
+      trigger_kind: "quota_source_disagreement"
+    )
+  end
+
   @spec claim_gateway_reconciliation_gate(UpstreamIdentity.t() | Ecto.UUID.t()) ::
           :ok | :duplicate
   def claim_gateway_reconciliation_gate(identity_or_id) do
@@ -268,7 +277,8 @@ defmodule CodexPooler.Jobs.UpstreamEnqueue do
 
   # Scheduled and gateway triggers share one automatic dedup boundary per
   # upstream identity: an incomplete job of either shape blocks a new insert
-  # regardless of age, and cancelled/discarded jobs are replaceable immediately.
+  # regardless of age. Discrepancy triggers also retain cancelled/discarded
+  # attempts for their 60-second cooldown; other triggers keep existing behavior.
   # Gateway enqueue attempts retain a 60-second inserted-at cooldown. Scheduled
   # fanout uses 55 seconds so small cron/queue timing differences do not suppress
   # the next minute; the untimed incomplete guard still prevents overlap when
@@ -292,9 +302,15 @@ defmodule CodexPooler.Jobs.UpstreamEnqueue do
       nil ->
         args
         |> AccountReconciliationWorker.new(automatic_reconciliation_job_options(opts))
-        |> Oban.insert()
+        |> Oban.insert(automatic_reconciliation_insert_options(opts))
     end
     |> tap_job_status_event(pool_id, "account_reconciliation", "scheduled")
+  end
+
+  defp automatic_reconciliation_insert_options(opts) do
+    if Keyword.get(opts, :trigger_kind) == "quota_source_disagreement",
+      do: [retry: false],
+      else: []
   end
 
   defp incomplete_automatic_reconciliation_job(identity_id) do
@@ -328,10 +344,17 @@ defmodule CodexPooler.Jobs.UpstreamEnqueue do
 
   defp automatic_reconciliation_job_options(opts) do
     unique =
-      if Keyword.get(opts, :trigger_kind) == "scheduled" do
-        @scheduled_reconciliation_unique
-      else
-        @automatic_reconciliation_unique
+      case Keyword.get(opts, :trigger_kind) do
+        "scheduled" ->
+          @scheduled_reconciliation_unique
+
+        # A failed/cancelled discrepancy refresh must not cause an ingestion
+        # storm. This durable gate rolls back with a caller-owned transaction.
+        "quota_source_disagreement" ->
+          Keyword.put(@automatic_reconciliation_unique, :states, :all)
+
+        _trigger ->
+          @automatic_reconciliation_unique
       end
 
     opts

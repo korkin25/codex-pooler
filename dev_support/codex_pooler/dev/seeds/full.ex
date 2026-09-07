@@ -1273,7 +1273,7 @@ defmodule CodexPooler.Dev.Seeds.Full do
       used_percent: if(spec.used_percent, do: Decimal.new(spec.used_percent)),
       display_label: quota_display_label(spec.quota_key, extras),
       limit_name: quota_limit_name(spec.quota_key, extras),
-      source: "dev_seed",
+      source: "codex_usage_api",
       source_precision: "observed",
       quota_scope: if(Keyword.get(extras, :model), do: "model", else: "account"),
       quota_family: spec.quota_key,

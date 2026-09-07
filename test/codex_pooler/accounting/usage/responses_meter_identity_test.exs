@@ -100,7 +100,7 @@ defmodule CodexPooler.Accounting.UsageResponsesMeterIdentityTest do
       metered_feature: Keyword.get(overrides, :metered_feature),
       raw_metered_feature: Keyword.get(overrides, :raw_metered_feature),
       raw_limit_id: Keyword.get(overrides, :raw_limit_id),
-      source: "test",
+      source: "codex_usage_api",
       freshness_state: "fresh",
       observed_at: @as_of
     }

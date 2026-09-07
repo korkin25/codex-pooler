@@ -1755,7 +1755,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
       Map.merge(
         %{
           reset_at: reset_at,
-          source: "codex_response_headers",
+          source: "codex_usage_api",
           source_precision: "observed",
           freshness_state: "fresh"
         },

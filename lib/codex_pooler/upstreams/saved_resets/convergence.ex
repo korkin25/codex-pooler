@@ -23,6 +23,7 @@ defmodule CodexPooler.Upstreams.SavedResets.Convergence do
   import Ecto.Query
 
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.Windows
   alias CodexPooler.Upstreams.SavedResets.ConfirmationMetadata
   alias CodexPooler.Upstreams.SavedResets.ConvergenceTelemetry
@@ -114,7 +115,11 @@ defmodule CodexPooler.Upstreams.SavedResets.Convergence do
       windows = Windows.list_evidence(identity)
 
       case windows
-           |> PostResetEvidence.classify(consumed_at, now)
+           |> PostResetEvidence.classify(
+             consumed_at,
+             now,
+             CredentialFencing.credential_epoch(identity)
+           )
            |> phase_for_classification(redemption, now) do
         nil -> nil
         target -> {target, windows}

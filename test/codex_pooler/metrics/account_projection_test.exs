@@ -94,7 +94,7 @@ defmodule CodexPooler.Metrics.AccountProjectionTest do
     end
   end
 
-  test "unknown-time evidence retains values, resets and shared conflicts without positive readiness" do
+  test "unknown-time header diagnostics do not invalidate authoritative API readiness" do
     for time <- [nil, "invalid-time"] do
       missing =
         window(%{
@@ -114,7 +114,7 @@ defmodule CodexPooler.Metrics.AccountProjectionTest do
                labels[:state] == "unknown"
              end)
 
-      assert [{_, [account_id: @account, provider: _, state: "unknown"], 1}] =
+      assert [{_, [account_id: @account, provider: _, state: "weekly_only_probe"], 1}] =
                samples(p, :account_quota_readiness)
 
       assert [{_, labels, 0}] =

@@ -14,7 +14,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
   @old_reset ~U[2026-09-13 20:49:16Z]
   @new_reset ~U[2026-09-14 00:57:27Z]
 
-  test "future reset disagreement survives stale-header deduplication without changing routing" do
+  test "API percentage and reset remain visible with optional raw disagreement details" do
     old =
       window(
         source: "codex_response_headers",
@@ -29,11 +29,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
       assert [^fresh] = WindowSelector.logical_windows(raw, @now)
       row = weekly(raw)
       assert row.label == "Account Weekly"
-      assert row.percent == nil
-      assert row.percent_label == "sources differ"
+      assert Decimal.equal?(row.percent, 94)
+      assert row.percent_label == "94%"
       assert row.selected_percent_label == "94%"
       assert row.selected_source == "codex_usage_api"
-      assert row.reset_display_state == :absent
+      assert row.reset_at == @new_reset
       assert [header, usage] = row.observations
       assert header.used == "98%"
       assert header.remaining == "2%"
@@ -47,12 +47,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
       assert [^fresh] = WindowSelector.logical_windows(raw, @now)
 
       html = render_component(&QuotaLimitRow.quota_limit_row/1, id: "test-weekly", limit: row)
-      assert html =~ "Sources disagree; remaining quota is uncertain"
+      refute html =~ "Sources disagree; remaining quota is uncertain"
       assert html =~ "codex_response_headers"
       assert html =~ "98% used / 2% remaining"
       assert html =~ "2026-09-13T20:49:16Z"
       assert html =~ "data-freshness=\"stale\""
-      assert html =~ "<details open"
+      refute html =~ "<details open"
     end
   end
 
@@ -109,7 +109,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
     end
   end
 
-  test "chronological usage decrease stays uncertain while both windows remain open" do
+  test "API usage decrease updates the main value with diagnostics retained" do
     older =
       window(
         source: "codex_response_headers",
@@ -122,7 +122,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
     for raw <- [[older, newer], [newer, older]] do
       row = weekly(raw)
       assert row.source_disagreement
-      assert row.percent_label == "sources differ"
+      assert row.percent_label == "95%"
       refute row.reset_disagreement
     end
   end

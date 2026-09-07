@@ -333,19 +333,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   @tag :relative_countdown_contract
-  test "renders anchored and floating Spark reset semantics from the shared quota projection", %{
+  test "renders API Spark reset timestamps without inferring starts-on-use semantics", %{
     conn: conn,
     scope: scope
   } do
     pool = pool_fixture(%{name: "Spark reset semantics Pool"})
     %{identity: anchored} = upstream_assignment_fixture(pool, %{account_label: "Anchored Spark"})
-    %{identity: floating} = upstream_assignment_fixture(pool, %{account_label: "Floating Spark"})
+    %{identity: moving} = upstream_assignment_fixture(pool, %{account_label: "Moving Spark"})
     %{identity: unknown} = upstream_assignment_fixture(pool, %{account_label: "Unknown Spark"})
 
     initial_observed_at =
       DateTime.utc_now() |> DateTime.add(-10, :minute) |> DateTime.truncate(:microsecond)
 
-    for identity <- [anchored, floating] do
+    for identity <- [anchored, moving] do
       for offset <- [0, 60, 300] do
         observed_at = DateTime.add(initial_observed_at, offset, :second)
 
@@ -361,32 +361,32 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       end
     end
 
-    anchored_floating = spark_weekly_row!(anchored)
-    floating_control = spark_weekly_row!(floating)
+    initial_api = spark_weekly_row!(anchored)
+    moving_api = spark_weekly_row!(moving)
 
-    assert anchored_floating.metadata["reset_state"] == "floating"
-    assert floating_control.metadata["reset_state"] == "floating"
+    refute Map.has_key?(initial_api.metadata, "reset_state")
+    refute Map.has_key?(moving_api.metadata, "reset_state")
 
-    anchored_observed_at = DateTime.add(anchored_floating.observed_at, 104, :second)
+    anchored_observed_at = DateTime.add(initial_api.observed_at, 104, :second)
 
     record_spark_usage_payload!(
       anchored,
       spark_weekly_usage_payload(
         0,
-        anchored_floating.reset_at,
+        initial_api.reset_at,
         604_800 - 104
       ),
       anchored_observed_at
     )
 
     anchored_row = spark_weekly_row!(anchored)
-    floating_row = spark_weekly_row!(floating)
+    moving_row = spark_weekly_row!(moving)
 
-    assert anchored_row.metadata["reset_state"] == "anchored"
+    refute Map.has_key?(anchored_row.metadata, "reset_state")
     assert Decimal.equal?(anchored_row.used_percent, Decimal.new("0"))
-    assert DateTime.compare(anchored_row.reset_at, anchored_floating.reset_at) == :eq
+    assert DateTime.compare(anchored_row.reset_at, initial_api.reset_at) == :eq
     assert DateTime.compare(anchored_row.observed_at, anchored_observed_at) == :eq
-    assert floating_row.metadata["reset_state"] == "floating"
+    refute Map.has_key?(moving_row.metadata, "reset_state")
 
     sensitive_marker = "provider-sensitive-marker-must-not-render"
 
@@ -395,11 +395,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                spark_weekly_quota_window(initial_observed_at, %{
                  "provider_debug" => sensitive_marker
                })
+               |> Map.put(:reset_at, nil)
+               |> Map.put(:used_percent, Decimal.new("40"))
              ])
 
     accounts = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
     anchored_account = Enum.find(accounts, &(&1.identity.id == anchored.id))
-    floating_account = Enum.find(accounts, &(&1.identity.id == floating.id))
+    moving_account = Enum.find(accounts, &(&1.identity.id == moving.id))
     unknown_account = Enum.find(accounts, &(&1.identity.id == unknown.id))
 
     assert Enum.find(
@@ -409,10 +411,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              :anchored
 
     assert Enum.find(
-             floating_account.quota_limits,
+             moving_account.quota_limits,
              &(&1.key == "model-codex_spark-secondary-10080")
            ).reset_semantics ==
-             :floating
+             :anchored
 
     assert Enum.find(
              unknown_account.quota_limits,
@@ -425,8 +427,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     anchored_reset_id =
       "upstream-account-#{anchored.id}-limit-model-codex_spark-secondary-10080-reset"
 
-    floating_reset_id =
-      "upstream-account-#{floating.id}-limit-model-codex_spark-secondary-10080-reset"
+    moving_reset_id =
+      "upstream-account-#{moving.id}-limit-model-codex_spark-secondary-10080-reset"
 
     unknown_reset_id =
       "upstream-account-#{unknown.id}-limit-model-codex_spark-secondary-10080-reset"
@@ -443,24 +445,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "##{floating_reset_id}[data-countdown-state='waiting']",
-             "starts on use"
+             "##{moving_reset_id}[title^='resets '][data-countdown-state='running'][phx-hook='RelativeCountdown'][data-countdown-at='#{DateTime.to_iso8601(moving_row.reset_at)}']"
            )
 
-    refute has_element?(view, "##{floating_reset_id}[phx-hook]")
-    refute has_element?(view, "##{floating_reset_id}[data-countdown-at]")
-
-    assert has_element?(
-             view,
-             "##{floating_reset_id}[title='provider reports a rolling seven-day window until use starts']"
-           )
+    refute has_element?(view, "##{moving_reset_id}", "starts on use")
 
     refute has_element?(view, "##{unknown_reset_id}")
     refute render(view) =~ sensitive_marker
   end
 
   @tag :provider_reset_convergence
-  test "converges anchored and floating Spark cards with weekly-only account routing", %{
+  test "renders API Spark reset corrections alongside weekly-only account routing", %{
     conn: conn,
     scope: scope
   } do
@@ -469,8 +464,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     %{identity: anchored_identity} =
       upstream_assignment_fixture(pool, %{account_label: "Anchored Spark convergence"})
 
-    %{identity: floating_identity} =
-      upstream_assignment_fixture(pool, %{account_label: "Floating Spark convergence"})
+    %{identity: moving_identity} =
+      upstream_assignment_fixture(pool, %{account_label: "Moving Spark convergence"})
 
     %{identity: legacy_identity, assignment: legacy_assignment} =
       upstream_assignment_fixture(pool, %{account_label: "Weekly-only convergence"})
@@ -479,7 +474,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     old_reset = DateTime.add(as_of, -3, :day)
     current_reset = DateTime.add(as_of, 6, :day)
     anchored_spark_observed_at = DateTime.add(as_of, -5, :minute)
-    floating_spark_observed_at = DateTime.add(as_of, -10, :minute)
+    moving_spark_observed_at = DateTime.add(as_of, -10, :minute)
     legacy_observed_at = DateTime.add(as_of, -2 * Evidence.freshness_ttl_seconds(), :second)
 
     current_observed_at = as_of
@@ -492,11 +487,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              ])
 
     for offset <- [0, 60, 300] do
-      observed_at = DateTime.add(floating_spark_observed_at, offset, :second)
+      observed_at = DateTime.add(moving_spark_observed_at, offset, :second)
 
       assert {:ok, _window} =
                EvidenceStore.record_evidence(
-                 floating_identity,
+                 moving_identity,
                  spark_weekly_quota_window(observed_at, %{
                    "reset_after_seconds" => 604_800
                  }),
@@ -580,7 +575,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     accounts = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
     anchored_account = Enum.find(accounts, &(&1.identity.id == anchored_identity.id))
-    floating_account = Enum.find(accounts, &(&1.identity.id == floating_identity.id))
+    moving_account = Enum.find(accounts, &(&1.identity.id == moving_identity.id))
     legacy_account = Enum.find(accounts, &(&1.identity.id == legacy_identity.id))
 
     assert anchored_spark =
@@ -592,17 +587,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert anchored_spark.reset_semantics == :anchored
     assert String.starts_with?(anchored_spark.reset_title, "resets ")
 
-    assert floating_spark =
+    assert moving_spark =
              Enum.find(
-               floating_account.quota_limits,
+               moving_account.quota_limits,
                &(&1.key == "model-codex_spark-secondary-10080")
              )
 
-    assert floating_spark.reset_semantics == :floating
-    assert floating_spark.reset_label == "starts on use"
-
-    assert floating_spark.reset_title ==
-             "provider reports a rolling seven-day window until use starts"
+    assert moving_spark.reset_semantics == :anchored
+    assert String.starts_with?(moving_spark.reset_title, "resets ")
 
     assert legacy_account.quota_readiness.state == "weekly_only_probe"
     assert legacy_account.quota_readiness.label == "Weekly quota probe"
@@ -613,8 +605,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     anchored_reset_id =
       "upstream-account-#{anchored_identity.id}-limit-model-codex_spark-secondary-10080-reset"
 
-    floating_reset_id =
-      "upstream-account-#{floating_identity.id}-limit-model-codex_spark-secondary-10080-reset"
+    moving_reset_id =
+      "upstream-account-#{moving_identity.id}-limit-model-codex_spark-secondary-10080-reset"
 
     legacy_card_id = "upstream-account-#{legacy_identity.id}"
 
@@ -625,8 +617,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "##{floating_reset_id}[title='provider reports a rolling seven-day window until use starts']",
-             "starts on use"
+             "##{moving_reset_id}[title^='resets '][data-countdown-state='running'][data-countdown-at]"
            )
 
     assert has_element?(view, "##{legacy_card_id}-quota-readiness-state", "weekly_only_probe")
@@ -3201,7 +3192,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  credits: 64,
                  used_percent: Decimal.new("36"),
                  reset_at: DateTime.add(now, 4, :hour),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3213,7 +3204,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  credits: 450,
                  used_percent: Decimal.new("10"),
                  reset_at: DateTime.add(now, 6, :day),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3228,7 +3219,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  display_label: "GPT-5.3-Codex-Spark",
                  limit_name: "codex_other",
                  metered_feature: "codex_bengalfox",
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  quota_scope: "model",
                  model: "gpt-5.3-codex-spark",
@@ -3245,7 +3236,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  display_label: "GPT-5.3-Codex-Spark",
                  limit_name: "codex_other",
                  metered_feature: "codex_bengalfox",
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  quota_scope: "model",
                  model: "gpt-5.3-codex-spark",
@@ -3263,7 +3254,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  credits: 0,
                  used_percent: Decimal.new("25"),
                  reset_at: DateTime.add(now, 5, :day),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3610,7 +3601,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
   @tag :upstream_quota_dashboard_regression
   @tag :upstream_quota_evidence_stability
-  test "upstream cards keep persisted observed quota rows visible", %{
+  test "upstream cards keep persisted API quota rows visible", %{
     conn: conn,
     scope: scope
   } do
@@ -3635,7 +3626,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 300,
                  credits: 64,
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_rate_limit_event",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3645,7 +3636,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 10_080,
                  credits: 450,
                  reset_at: DateTime.add(now, 6, :day),
-                 source: "codex_rate_limit_event",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3660,7 +3651,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("0"),
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_rate_limit_event",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3675,7 +3666,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("0"),
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_rate_limit_event",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3877,7 +3868,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   @tag :upstream_quota_evidence_stability
-  test "mounted upstream routes omit stale additional quota history without mutating it",
+  test "mounted upstream routes label stale additional API history without mutating it",
        %{
          conn: conn,
          scope: scope
@@ -3899,7 +3890,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     stale_observed_at = DateTime.add(now, -(Evidence.freshness_ttl_seconds() + 60), :second)
 
-    raw_limit_name = "gpt-reserve"
+    raw_limit_name = "private-reserve-provider-limit"
     raw_metered_feature = "base_model_inference"
     raw_metadata = "sanitized-reserve-provider-metadata"
 
@@ -4053,8 +4044,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
            )
 
     assert has_element?(list_view, "##{unknown_id}-progress")
-    refute has_element?(list_view, "##{stale_id}")
-    refute has_element?(list_view, "GPT-Reserve Weekly")
+
+    assert has_element?(
+             list_view,
+             "##{stale_id}[data-evidence-state='stale'][data-meter-state='historical']",
+             "75%"
+           )
+
+    assert has_element?(list_view, "##{stale_id}", "last reported")
+    refute has_element?(list_view, "##{stale_id}-reset[data-countdown-state='running']")
 
     limits_fragment = list_view |> element("##{prefix}s") |> render()
     limits_document = LazyHTML.from_fragment(limits_fragment)
@@ -4088,9 +4086,20 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              "Unknown additional 5h"
            )
 
-    refute has_element?(cockpit_view, "#upstream-quota-limit-model-gpt_reserve-secondary-10080")
+    assert has_element?(
+             cockpit_view,
+             "#upstream-quota-limit-model-gpt_reserve-secondary-10080[data-evidence-state='stale'][data-meter-state='historical']",
+             "75%"
+           )
+
+    assert has_element?(
+             cockpit_view,
+             "#upstream-quota-limit-model-gpt_reserve-secondary-10080",
+             "last reported"
+           )
+
     cockpit_html = render(cockpit_view)
-    refute cockpit_html =~ "GPT-Reserve Weekly"
+    assert cockpit_html =~ "GPT-Reserve Weekly"
     refute cockpit_html =~ raw_limit_name
     refute cockpit_html =~ raw_metered_feature
     refute cockpit_html =~ raw_metadata
@@ -4321,12 +4330,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                }
              ])
 
-    assert [stored_headers_window] =
+    assert [selected_api_window] =
              identity
              |> QuotaWindows.list_quota_windows()
              |> Enum.filter(&(&1.quota_key == "codex_spark" and &1.window_kind == "primary"))
 
-    assert stored_headers_window.source == "codex_response_headers"
+    assert selected_api_window.source == "codex_usage_api"
+    assert selected_api_window.reset_at == usage_reset_at
+
+    assert Enum.any?(QuotaWindows.list_evidence(identity), fn row ->
+             row.source == "codex_response_headers" and row.observed_at == headers_observed_at
+           end)
 
     execute_scheduled_upstreams_reload(view)
 
@@ -4927,7 +4941,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("10"),
                  reset_at: DateTime.add(now, 900, :second),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -4936,7 +4950,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 10_080,
                  used_percent: Decimal.new("100"),
                  reset_at: DateTime.add(now, 900, :second),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                }
@@ -4994,7 +5008,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("10"),
                  reset_at: DateTime.add(now, 900, :second),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -5003,7 +5017,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  window_minutes: 10_080,
                  used_percent: Decimal.new("100"),
                  reset_at: DateTime.add(now, 900, :second),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                }
@@ -6448,7 +6462,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  quota_scope: "model",
                  model: "gpt-5.3-codex-spark",
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                }
@@ -6473,9 +6487,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  quota_scope: "model",
                  model: "gpt-5.3-codex-spark",
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
-                 observed_at: now
+                 observed_at: DateTime.add(now, 1, :microsecond)
                }
              ])
 
@@ -6489,28 +6503,28 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   @tag :upstream_quota_evidence_stability
-  test "refresh keeps model limits visible when a weak zero quota update arrives", %{
+  test "refresh applies a newer API zero and reset correction to model limits", %{
     conn: conn,
     scope: scope
   } do
     {:ok, pool} =
       Pools.create_pool(scope, %{
-        slug: "realtime-weak-zero-model-quota",
-        name: "Realtime Weak Zero Model Quota"
+        slug: "realtime-api-correction-model-quota",
+        name: "Realtime API Correction Model Quota"
       })
 
     %{identity: identity} =
       upstream_assignment_fixture(pool, %{
-        account_label: "Realtime Weak Zero Model Codex",
-        assignment_label: "Realtime weak zero model assignment"
+        account_label: "Realtime API Correction Model Codex",
+        assignment_label: "Realtime API correction model assignment"
       })
 
     now = DateTime.utc_now() |> DateTime.add(-300, :second)
     primary_reset_at = DateTime.add(now, 2, :hour)
     weekly_reset_at = DateTime.add(now, 5, :day)
-    weak_observed_at = DateTime.add(now, 60, :second)
-    weak_primary_reset_at = DateTime.add(weak_observed_at, 5, :hour)
-    weak_weekly_reset_at = DateTime.add(weak_observed_at, 7, :day)
+    corrected_observed_at = DateTime.add(now, 60, :second)
+    corrected_primary_reset_at = DateTime.add(corrected_observed_at, 5, :hour)
+    corrected_weekly_reset_at = DateTime.add(corrected_observed_at, 7, :day)
 
     assert {:ok, [_primary, _weekly]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -6574,11 +6588,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  active_limit: 0,
                  credits: 0,
                  used_percent: Decimal.new("0"),
-                 reset_at: weak_primary_reset_at,
+                 reset_at: corrected_primary_reset_at,
                  source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
-                 observed_at: weak_observed_at
+                 observed_at: corrected_observed_at
                },
                %{
                  quota_key: "codex_spark",
@@ -6591,43 +6605,56 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  active_limit: 0,
                  credits: 0,
                  used_percent: Decimal.new("0"),
-                 reset_at: weak_weekly_reset_at,
+                 reset_at: corrected_weekly_reset_at,
                  source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
-                 observed_at: weak_observed_at
+                 observed_at: corrected_observed_at
                }
              ])
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, primary_selector, "99%")
-    assert has_element?(view, weekly_selector, "85%")
+    assert has_element?(view, primary_selector, "100%")
+    assert has_element?(view, weekly_selector, "100%")
+    assert has_element?(view, "#{primary_selector}-progress[value='100']")
+    assert has_element?(view, "#{weekly_selector}-progress[value='100']")
+
+    assert has_element?(
+             view,
+             "#{primary_selector}-reset[data-countdown-at='#{DateTime.to_iso8601(corrected_primary_reset_at)}']"
+           )
+
+    assert has_element?(
+             view,
+             "#{weekly_selector}-reset[data-countdown-at='#{DateTime.to_iso8601(corrected_weekly_reset_at)}']"
+           )
+
     refute has_element?(view, primary_selector, "not reported")
     refute has_element?(view, weekly_selector, "not reported")
   end
 
   @tag :upstream_quota_evidence_stability
-  test "refresh keeps account limits visible when a weak zero quota update arrives", %{
+  test "refresh applies a newer API zero and reset correction to account limits", %{
     conn: conn,
     scope: scope
   } do
     {:ok, pool} =
       Pools.create_pool(scope, %{
-        slug: "realtime-weak-zero-quota",
-        name: "Realtime Weak Zero Quota"
+        slug: "realtime-api-correction-quota",
+        name: "Realtime API Correction Quota"
       })
 
     %{identity: identity} =
       upstream_assignment_fixture(pool, %{
-        account_label: "Realtime Weak Zero Codex",
-        assignment_label: "Realtime weak zero assignment"
+        account_label: "Realtime API Correction Codex",
+        assignment_label: "Realtime API correction assignment"
       })
 
-    now = DateTime.utc_now()
+    now = DateTime.utc_now() |> DateTime.add(-300, :second)
     reset_at = DateTime.add(now, 2, :hour)
-    weak_observed_at = DateTime.add(now, 60, :second)
-    weak_reset_at = DateTime.add(weak_observed_at, 4, :hour)
+    corrected_observed_at = DateTime.add(now, 60, :second)
+    corrected_reset_at = DateTime.add(corrected_observed_at, 4, :hour)
 
     assert {:ok, [_window]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -6663,21 +6690,21 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  active_limit: 0,
                  credits: 0,
                  used_percent: Decimal.new("0"),
-                 reset_at: weak_reset_at,
+                 reset_at: corrected_reset_at,
                  source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh",
-                 observed_at: weak_observed_at
+                 observed_at: corrected_observed_at
                }
              ])
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "89%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "100%")
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='89']"
+             "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='100']"
            )
   end
 
@@ -6708,7 +6735,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                  quota_scope: "model",
                  model: "gpt-5.3-codex-spark",
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                }
@@ -8705,7 +8732,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         window_minutes: 300,
         used_percent: Decimal.new("10"),
         reset_at: DateTime.add(DateTime.utc_now(), 900, :second),
-        source: "codex_usage",
+        source: "codex_usage_api",
         freshness_state: "fresh",
         observed_at: DateTime.utc_now()
       }
@@ -8719,7 +8746,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         window_minutes: 10_080,
         used_percent: Decimal.new("10"),
         reset_at: DateTime.add(DateTime.utc_now(), 900, :second),
-        source: "codex_usage",
+        source: "codex_usage_api",
         freshness_state: "fresh",
         observed_at: DateTime.utc_now()
       }
@@ -8745,7 +8772,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         window_minutes: 300,
         used_percent: Decimal.new("10"),
         reset_at: DateTime.add(now, 900, :second),
-        source: "codex_usage",
+        source: "codex_usage_api",
         freshness_state: "stale",
         observed_at: now
       }
@@ -8761,7 +8788,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         window_minutes: 300,
         used_percent: Decimal.new("10"),
         reset_at: DateTime.add(now, 900, :second),
-        source: "codex_usage",
+        source: "codex_usage_api",
         freshness_state: "fresh",
         observed_at: now
       },
@@ -8770,7 +8797,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         window_minutes: 10_080,
         used_percent: Decimal.new("100"),
         reset_at: DateTime.add(now, 900, :second),
-        source: "codex_usage",
+        source: "codex_usage_api",
         freshness_state: "fresh",
         observed_at: now
       }

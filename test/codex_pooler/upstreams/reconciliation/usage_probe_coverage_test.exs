@@ -106,6 +106,45 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbeCoverageTest do
     )
   end
 
+  for omission <- [:omitted, :null] do
+    test "#{omission} API account window retains old values with old freshness" do
+      at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      payload = new_shape_payload(at)
+
+      payload =
+        case unquote(omission) do
+          :omitted -> Map.delete(payload, "rate_limit")
+          :null -> put_in(payload, ["rate_limit", "primary_window"], nil)
+        end
+
+      {:ok, fake} = fake_with_payload(payload)
+      %{identity: identity, assignment: assignment} = assignment_with_fake(fake)
+      stale_legacy_5h_row!(identity, DateTime.add(at, -3_600))
+      [before] = account_rows(identity)
+      assert {:ok, _} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+      [after_probe] = account_rows(identity)
+
+      for field <- [:id, :used_percent, :reset_at, :observed_at, :last_sync_at] do
+        assert Map.fetch!(after_probe, field) == Map.fetch!(before, field)
+      end
+
+      refute Windows.fresh_window?(after_probe, DateTime.utc_now())
+      assert Decimal.equal?(after_probe.used_percent, 12)
+    end
+  end
+
+  test "API failure retains the last API value and timestamp rather than promoting headers" do
+    at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    {:ok, fake} = fake_with_payload(new_shape_payload(at))
+    %{identity: identity, assignment: assignment} = assignment_with_fake(fake)
+    assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    before = account_rows(identity)
+    FakeUpstream.set_mode(fake, {:json_error, 503, %{}})
+    assert {:error, _} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert account_rows(identity) == before
+    assert Enum.all?(Windows.list_quota_windows(identity), &(&1.source == "codex_usage_api"))
+  end
+
   test "the new payload shape with explicit null secondary covers its descriptors" do
     observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     {:ok, fake} = fake_with_payload(new_shape_payload(observed_at))
@@ -391,7 +430,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbeCoverageTest do
                  reset_at: DateTime.add(observed_at, 2, :hour),
                  observed_at: observed_at,
                  last_sync_at: observed_at,
-                 source: "codex_response_headers",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  quota_scope: "account",
                  quota_family: "account",
@@ -415,7 +454,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbeCoverageTest do
                observed_at: observed_at
              )
 
-    assert [persisted] = account_rows(identity)
+    assert [persisted] = Enum.filter(account_rows(identity), &(&1.quota_scope == "model"))
     assert persisted.quota_scope == "model"
     assert persisted.quota_family == "codex_model"
     assert persisted.model == "Account"

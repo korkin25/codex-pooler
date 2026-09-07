@@ -27,6 +27,53 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidenceTest do
     }
   end
 
+  test "runtime quota rejection reblocks until a newer API report for its meter" do
+    error = %{
+      window(
+        source: "codex_rate_limit_error",
+        used_percent: Decimal.new(100),
+        observed_at: DateTime.add(@now, -1)
+      )
+      | metadata: %{"runtime_provider_rejection" => true, "credential_epoch" => 1}
+    }
+
+    older_api = window(used_percent: Decimal.new(0), observed_at: DateTime.add(@now, -2))
+    newer_api = window(used_percent: Decimal.new(0))
+    assert PostResetEvidence.classify([older_api, error], @consumed_at, @now, 1) == :reblocked
+    assert PostResetEvidence.classify([newer_api, error], @consumed_at, @now, 1) == :confirmed
+    assert PostResetEvidence.classify([error], @consumed_at, @now, 1) == :reblocked
+
+    for source <- ~w(codex_response_headers codex_rate_limit_event) do
+      assert PostResetEvidence.classify([%{error | source: source}], @consumed_at, @now, 1) ==
+               :pending
+    end
+  end
+
+  test "model error named account and pre-consume or stale errors cannot reblock" do
+    error = %{
+      window(source: "codex_rate_limit_error", used_percent: Decimal.new(100))
+      | metadata: %{"runtime_provider_rejection" => true, "credential_epoch" => 1}
+    }
+
+    model_error = %{
+      error
+      | quota_scope: "model",
+        quota_family: "codex_model",
+        model: "other-model"
+    }
+
+    for ignored <- [
+          model_error,
+          %{error | observed_at: DateTime.add(@consumed_at, -1)},
+          %{error | freshness_state: "stale"},
+          %{error | observed_at: DateTime.add(@now, 1)},
+          %{error | reset_at: DateTime.add(@now, -1)},
+          %{error | metadata: %{}}
+        ] do
+      assert PostResetEvidence.classify([ignored], @consumed_at, @now, 1) == :pending
+    end
+  end
+
   test "fresh usable post-consume account evidence confirms" do
     windows = [window(used_percent: Decimal.new("0"))]
     assert PostResetEvidence.classify(windows, @consumed_at, @now) == :confirmed

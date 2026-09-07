@@ -2579,7 +2579,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
                  credits: 73,
                  used_percent: Decimal.new("27"),
                  reset_at: DateTime.add(now, 3, :hour),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  freshness_state: "fresh",
                  observed_at: now
@@ -3777,7 +3777,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
 
   @tag :upstream_quota_evidence_stability
   @tag :manual_cockpit_quota_render
-  test "cockpit omits stale additional quota variants without mutating persisted history", %{
+  test "cockpit retains stale API quota variants without mutating persisted history", %{
     conn: conn,
     scope: scope
   } do
@@ -3937,6 +3937,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
 
     assert Enum.sort(Enum.map(additional_limits, & &1.label)) == [
              "Fresh additional 5h",
+             "GPT-Reserve Weekly",
+             "Generic exhausted 5h",
+             "Generic markerless 5h",
              "Unknown additional 5h"
            ]
 
@@ -3974,14 +3977,27 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
              "Unknown additional 5h"
            )
 
-    for selector <- [reserve, exhausted, markerless, future_skew] do
-      refute has_element?(view, selector)
+    for selector <- [reserve, markerless] do
+      assert has_element?(
+               view,
+               "#{selector}[data-evidence-state='stale'][data-meter-state='historical']"
+             )
     end
 
+    assert has_element?(
+             view,
+             "#{exhausted}[data-evidence-state='stale'][data-meter-state='historical_exhausted']"
+           )
+
+    assert has_element?(view, "#{reserve}-progress[value='75']")
+    assert has_element?(view, "#{markerless}-progress[value='90']")
+    assert has_element?(view, "#{exhausted}-progress[value='0']")
+    refute has_element?(view, future_skew)
+
     html = render(view)
-    refute html =~ "GPT-Reserve Weekly"
-    refute html =~ "Generic exhausted 5h"
-    refute html =~ "Generic markerless 5h"
+    assert html =~ "GPT-Reserve Weekly"
+    assert html =~ "Generic exhausted 5h"
+    assert html =~ "Generic markerless 5h"
     refute html =~ "Generic future skew 5h"
     refute html =~ raw_descriptor
     assert Repo.get(AccountQuotaWindow, stale_window.id).id == stale_window.id
@@ -5921,7 +5937,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
       Map.merge(
         %{
           quota_key: "account",
-          source: "codex_usage",
+          source: "codex_usage_api",
           source_precision: "authoritative",
           quota_scope: "account",
           quota_family: "account",

@@ -1,11 +1,5 @@
 defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
-  @moduledoc """
-  Operator evidence view. It never selects a routing window or updates evidence.
-
-  Different future resets do not prove rollover. Keep competing source reports,
-  with their original timestamps and current TTL state, until their windows end.
-  Even a fresh report is an observation, not independently verified capacity.
-  """
+  @moduledoc "Optional raw diagnostics beside the authoritative Usage API quota view."
 
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Quotas.SourceObservations
@@ -29,36 +23,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
     |> Map.put(:reset_disagreement, reset_disagreement?)
     |> Map.put(:selected_percent_label, row.percent_label)
     |> Map.update!(:label, &scope_label(row.key, &1))
-    |> mark_disagreement(disagreement?)
-    |> mark_reset_disagreement(reset_disagreement?)
   end
 
   defp scope_label(:weekly, label), do: "Account #{label}"
 
   defp scope_label(_key, label), do: label
-
-  defp mark_disagreement(row, false), do: row
-
-  defp mark_disagreement(row, true) do
-    Map.merge(row, %{
-      percent: nil,
-      percent_value: 0,
-      percent_label: "sources differ",
-      meter_state: :unknown
-    })
-  end
-
-  defp mark_reset_disagreement(row, false), do: row
-
-  defp mark_reset_disagreement(row, true) do
-    Map.merge(row, %{
-      reset_at: nil,
-      reset_label: nil,
-      reset_title: nil,
-      reset_semantics: :unknown,
-      reset_display_state: :absent
-    })
-  end
 
   defp observations(windows, as_of) do
     windows

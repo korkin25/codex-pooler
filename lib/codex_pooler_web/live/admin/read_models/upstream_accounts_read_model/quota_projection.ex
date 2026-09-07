@@ -160,12 +160,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
         ) :: [quota_limit_row()]
   def quota_limit_rows(windows, datetime_preferences, %DateTime{} = snapshot_at)
       when is_list(windows) do
+    windows = WindowSelector.logical_windows(windows, snapshot_at)
+
     additional_limits =
       windows
-      |> Enum.reject(
-        &(account_quota_window?(&1) or
-            Evidence.current_freshness_state(&1, snapshot_at) == "stale")
-      )
+      |> Enum.reject(&account_quota_window?/1)
       |> Enum.filter(&informative_additional_quota_window?/1)
       |> Enum.sort_by(&quota_limit_sort_key/1)
       |> quota_limit_presentations()
@@ -216,7 +215,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     |> Enum.map(&put_account_credit_balance(&1, windows, snapshot_at, credit_balance))
   end
 
-  @doc "Projects raw observations separately from the unchanged routing selection."
+  @doc "Attaches optional raw diagnostics to the authoritative Usage API selection."
   def quota_limit_rows(windows, datetime_preferences, snapshot_at, credit_balance, raw_windows) do
     windows
     |> quota_limit_rows(datetime_preferences, snapshot_at, credit_balance)

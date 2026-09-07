@@ -1960,7 +1960,7 @@ defmodule CodexPooler.Admin.StatsTest do
                  active_limit: 100,
                  used_percent: Decimal.new(25),
                  reset_at: DateTime.add(now, 7, :day),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  quota_scope: "account",
                  quota_family: "account"
@@ -2068,7 +2068,7 @@ defmodule CodexPooler.Admin.StatsTest do
                  window_minutes: 43_200,
                  used_percent: Decimal.new("42.5"),
                  reset_at: DateTime.add(now, 30, :day),
-                 source: "codex_usage",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  quota_scope: "account",
                  quota_family: "account"
@@ -2671,7 +2671,7 @@ defmodule CodexPooler.Admin.StatsTest do
                  active_limit: 100,
                  used_percent: Decimal.new(10),
                  reset_at: DateTime.add(now, 5, :hour),
-                 source: "codex_rate_limits",
+                 source: "codex_usage_api",
                  source_precision: "authoritative",
                  quota_scope: "account",
                  quota_family: "account"

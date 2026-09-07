@@ -164,7 +164,7 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
           ] do
         retained_account = account_primary_window(source: source)
 
-        assert %{routing_state: :precise} =
+        assert %{eligible?: false, routing_state: :blocked} =
                  Windows.routing_quota_eligibility_from_snapshot(
                    routing_snapshot(:available, [retained_account]),
                    routing_scope_opts()
@@ -319,7 +319,7 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
   end
 
   describe "parser-to-Postgres model routing" do
-    test "one qualifying-looking zero preserves exhausted Spark routing pressure" do
+    test "one newer API zero restores Spark routing immediately" do
       %{identity: identity, model: model} = parser_routing_fixture()
       observed_at = ~U[2026-07-25 12:00:00Z]
       reset_at = DateTime.add(observed_at, @spark_weekly_seconds, :second)
@@ -332,7 +332,7 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
 
       assert Decimal.equal?(exhausted.used_percent, Decimal.new("100"))
       assert DateTime.compare(exhausted.reset_at, reset_at) == :eq
-      assert exhausted.metadata["reset_state"] == "anchored"
+      assert exhausted.source == "codex_usage_api"
 
       assert %{
                eligible?: false,
@@ -361,22 +361,22 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
       persisted = reload_window!(returned_zero)
 
       assert persisted.id == exhausted.id
-      assert Decimal.equal?(persisted.used_percent, Decimal.new("100"))
+      assert Decimal.equal?(persisted.used_percent, Decimal.new("0"))
       assert DateTime.compare(persisted.reset_at, exhausted.reset_at) == :eq
-      assert DateTime.compare(persisted.observed_at, exhausted.observed_at) == :eq
-      assert persisted.metadata["reset_state"] == "anchored"
+      assert DateTime.compare(persisted.observed_at, zero_at) == :eq
+      assert persisted.source == "codex_usage_api"
 
       assert %{
-               eligible?: false,
-               routing_state: :blocked,
-               exclusions: [%{reason_codes: ["exhausted"]}],
-               selection: %{blocked_windows: [%AccountQuotaWindow{id: persisted_id}]}
+               eligible?: true,
+               routing_state: :precise,
+               exclusions: [],
+               selection: %{routing_windows: selected_windows, blocked_windows: []}
              } = routing_eligibility(identity, model, zero_at)
 
-      assert persisted_id == persisted.id
+      assert Enum.any?(selected_windows, &(&1.id == persisted.id))
     end
 
-    test "a bounded immediate Spark anchor is selected for its model and restores eligibility" do
+    test "latest API Spark reset is selected only for its model" do
       %{identity: identity, model: model} = parser_routing_fixture()
       started_at = ~U[2026-07-25 13:00:00Z]
 
@@ -391,7 +391,7 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
         end)
         |> reload_window!()
 
-      assert floating.metadata["reset_state"] == "floating"
+      assert floating.source == "codex_usage_api"
 
       anchored_at = DateTime.add(floating.observed_at, 104, :second)
 
@@ -413,7 +413,7 @@ defmodule CodexPooler.Gateway.Routing.QuotaWindowRoutingTest do
       assert persisted.id == floating.id
       assert Decimal.equal?(persisted.used_percent, Decimal.new("0"))
       assert persisted.freshness_state == "fresh"
-      assert persisted.metadata["reset_state"] == "anchored"
+      assert persisted.source == "codex_usage_api"
       assert DateTime.compare(persisted.reset_at, floating.reset_at) == :eq
       assert DateTime.compare(persisted.observed_at, anchored_at) == :eq
 

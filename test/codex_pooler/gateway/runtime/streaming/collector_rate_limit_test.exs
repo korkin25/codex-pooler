@@ -62,18 +62,18 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CollectorRateLimitTest do
     assert_receive {:fake_upstream_chunk_barrier, 1, server, ^release}, @timeout
     assert_receive {^release, :chunk_read}, @timeout
     refute_received {^handler, :quota_write}
-    assert QuotaWindows.list_quota_windows(fixture.identity) == []
+    assert QuotaWindows.list_evidence(fixture.identity) == []
     if stale?, do: assert({:ok, _} = RequestReplay.arm(arm_input(fixture)))
     send(server, {:fake_upstream_release_chunk, release})
     assert {:ok, _} = Task.await(task, @timeout)
     assert FakeUpstream.count(upstream) == 1
 
     if stale? do
-      assert QuotaWindows.list_quota_windows(fixture.identity) == []
+      assert QuotaWindows.list_evidence(fixture.identity) == []
       refute_received {^handler, :quota_write}
       assert Repo.reload!(fixture.request).status == "in_progress"
     else
-      assert [window] = QuotaWindows.list_quota_windows(fixture.identity)
+      assert [window] = QuotaWindows.list_evidence(fixture.identity)
       assert window.source == "codex_rate_limit_event"
       assert Decimal.equal?(window.used_percent, Decimal.new(47))
       assert_receive {^handler, :quota_write}
@@ -100,7 +100,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CollectorRateLimitTest do
     assert :erlang.external_size(state) < 8_192
     fixture = replay_fixture(reservation?: true)
     assert :ok = RateLimitObserver.commit_events(fixture.identity, state)
-    assert [window] = QuotaWindows.list_quota_windows(fixture.identity)
+    assert [window] = QuotaWindows.list_evidence(fixture.identity)
     assert Decimal.equal?(window.used_percent, Decimal.new(0))
   end
 
@@ -150,7 +150,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CollectorRateLimitTest do
     assert :ok = RateLimitObserver.commit_events(fixture.identity, state)
 
     account =
-      Enum.filter(QuotaWindows.list_quota_windows(fixture.identity), &(&1.quota_key == "account"))
+      Enum.filter(QuotaWindows.list_evidence(fixture.identity), &(&1.quota_key == "account"))
 
     assert Enum.sort(Enum.map(account, &Decimal.to_integer(&1.used_percent))) == [14, 15]
   end

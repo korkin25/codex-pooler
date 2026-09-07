@@ -38,11 +38,11 @@ defmodule CodexPooler.Metrics.AccountPrometheus do
     account_quota_info: "Canonical retained quota meter group.",
     account_quota_window_duration_seconds: "Reported positive quota window duration in seconds.",
     account_quota_source_conflict:
-      "Unelapsed source usage disagreement under shared UI semantics.",
+      "Diagnostic source usage disagreement; Usage API remains authoritative.",
     account_quota_reset_conflict:
-      "Known reset disagreement exceeding 60 seconds under shared UI semantics.",
+      "Diagnostic reset disagreement exceeding 60 seconds; API reset is authoritative.",
     account_quota_routing_selection_present:
-      "Presence of the routing selector observation in this group.",
+      "Presence of the authoritative Usage API selection in this group.",
     account_quota_observation_info: "Retained time-visible source quota observation.",
     account_quota_observation_used_percent:
       "Valid reported used percentage; missing values are omitted.",
@@ -57,7 +57,8 @@ defmodule CodexPooler.Metrics.AccountPrometheus do
     account_quota_observation_elapsed:
       "One when a known reset has elapsed; zero does not establish capacity.",
     account_quota_observation_used_known: "One only for a valid reported used percentage.",
-    account_quota_observation_routing_selected: "One for the exact routing selector observation."
+    account_quota_observation_routing_selected:
+      "One for the selected authoritative Usage API observation."
   ]
 
   def families, do: @families

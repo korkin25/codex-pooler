@@ -20,12 +20,19 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
     routing_windows =
       windows
       |> Enum.filter(&window_in_model_scope?(&1, opts))
-      |> reject_superseded_primary_windows(timestamp, opts)
       |> WindowSelector.logical_windows(timestamp)
+      |> reject_superseded_primary_windows(timestamp, opts)
       |> select_current_account_primary_variant(timestamp)
 
     %{
       windows: windows,
+      provider_rejections:
+        windows
+        |> WindowSelector.current_provider_rejections(
+          timestamp,
+          Keyword.get(opts, :credential_epoch)
+        )
+        |> Enum.filter(&window_in_model_scope?(&1, opts)),
       routing_windows: routing_windows,
       primary: WindowSelector.best_account_primary_variant(routing_windows, timestamp),
       secondary:
@@ -46,11 +53,18 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
   @spec eligibility_from_snapshot(RoutingQuotaSnapshot.t(), keyword()) :: map()
   def eligibility_from_snapshot(%RoutingQuotaSnapshot{} = snapshot, opts \\ [])
       when is_list(opts) do
-    opts = Keyword.put(opts, :at, snapshot.as_of)
+    opts =
+      opts
+      |> Keyword.put(:at, snapshot.as_of)
+      |> Keyword.put(:credential_epoch, snapshot.credential_epoch)
+
     raw_windows = RoutingQuotaSnapshot.time_visible_raw_windows(snapshot)
     ordinary = eligibility_from_windows(raw_windows, opts)
 
     cond do
+      ordinary.selection.provider_rejections != [] ->
+        ordinary
+
       AccountAvailabilityStore.blocked?(
         snapshot.availability,
         snapshot.credential_epoch,
@@ -146,17 +160,29 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
   @spec eligibility_from_selection(map(), keyword()) :: map()
   def eligibility_from_selection(selection, opts) when is_map(selection) and is_list(opts) do
     timestamp = Keyword.get(opts, :at, now())
+    rejections = Map.get(selection, :provider_rejections, [])
     routing_state = routing_quota_state(selection, timestamp)
 
     eligible? = routing_quota_eligible?(routing_state)
 
-    %{
+    result = %{
       eligible?: eligible?,
       routing_state: routing_state,
       warnings: quota_routing_warnings(selection, timestamp, routing_state),
       selection: selection,
       exclusions: quota_routing_exclusions(selection, timestamp, eligible?)
     }
+
+    if rejections == [] do
+      result
+    else
+      %{
+        result
+        | eligible?: false,
+          routing_state: :blocked,
+          exclusions: Enum.map(rejections, &window_exclusion(&1, timestamp))
+      }
+    end
   end
 
   @doc """

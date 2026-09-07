@@ -105,7 +105,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
         |> Map.put(:upstream_identity_id, identity_id)
 
       with {:ok, existing} <- get_existing_evidence(identity_id, evidence),
-           :ok <- validate_initial_relative_weekly_observation(existing, evidence, timestamp) do
+           :ok <- validate_relative_weekly_observation(existing, evidence, timestamp) do
         timestamped_attrs = merge_attrs(existing, attrs, evidence, timestamp)
 
         result =
@@ -381,6 +381,37 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
       optional_string(window.raw_metered_feature) == optional_string(evidence.raw_metered_feature)
   end
 
+  # Keep the API snapshot intact, including decreases, missing measurements and
+  # reset corrections. Never refresh its age with an older/equal response.
+  # Credential epoch/probe sequence fencing still surrounds production writes.
+  defp merge_attrs(existing, attrs, %Evidence{source: "codex_usage_api"} = evidence, timestamp) do
+    if is_nil(existing.id) or newer_observation?(evidence.observed_at, existing.observed_at) do
+      attrs
+      |> Map.update!(:metadata, &clear_candidate/1)
+      |> put_timestamps(existing)
+    else
+      existing
+      |> window_attrs()
+      |> Map.put(:updated_at, timestamp)
+    end
+  end
+
+  # A diagnostic observation is not another rejection. In particular it must
+  # not inherit the trusted marker while restamping the age, epoch or reset.
+  defp merge_attrs(
+         %Quota.AccountQuotaWindow{
+           source: "codex_rate_limit_error",
+           metadata: %{"runtime_provider_rejection" => true}
+         } = existing,
+         _attrs,
+         %Evidence{source: "codex_rate_limit_error", metadata: metadata},
+         timestamp
+       )
+       when not is_map_key(metadata, "runtime_provider_rejection") or
+              :erlang.map_get("runtime_provider_rejection", metadata) != true do
+    existing |> window_attrs() |> Map.put(:updated_at, timestamp)
+  end
+
   defp merge_attrs(%Quota.AccountQuotaWindow{id: nil} = existing, attrs, evidence, timestamp) do
     attrs
     |> put_timestamps(existing)
@@ -456,12 +487,13 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
 
   defp put_model_weekly_anchored_state(attrs, _evidence), do: attrs
 
-  defp validate_initial_relative_weekly_observation(
-         %Quota.AccountQuotaWindow{id: nil},
+  defp validate_relative_weekly_observation(
+         %Quota.AccountQuotaWindow{} = existing,
          %Evidence{} = evidence,
          timestamp
        ) do
-    if invalid_relative_weekly_timing?(evidence, timestamp) do
+    if (is_nil(existing.id) or newer_observation?(evidence.observed_at, existing.observed_at)) and
+         invalid_relative_weekly_timing?(evidence, timestamp) do
       {:error,
        %{
          code: :invalid_relative_weekly_timing,
@@ -472,7 +504,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
     end
   end
 
-  defp validate_initial_relative_weekly_observation(_existing, _evidence, _timestamp), do: :ok
+  defp validate_relative_weekly_observation(_existing, _evidence, _timestamp), do: :ok
 
   defp clear_candidate_attrs(attrs),
     do: Map.update!(attrs, :metadata, &clear_candidate/1)

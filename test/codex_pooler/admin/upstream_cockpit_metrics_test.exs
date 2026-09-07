@@ -390,7 +390,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
       Map.merge(
         %{
           quota_key: "account",
-          source: "codex_usage",
+          source: "codex_usage_api",
           source_precision: "authoritative",
           quota_scope: "account",
           quota_family: "account",

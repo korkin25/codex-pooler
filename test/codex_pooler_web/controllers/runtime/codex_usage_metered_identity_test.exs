@@ -116,7 +116,11 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageMeteredIdentityTest do
       stale_windows
       |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), stale_at)
 
-    refute Enum.any?(stale_admin_rows, &is_binary(&1.key))
+    stale_additional = Enum.filter(stale_admin_rows, &is_binary(&1.key))
+    assert length(stale_additional) == 2
+    assert Enum.all?(stale_additional, &(&1.evidence_state == :stale))
+    assert Enum.all?(stale_additional, &(&1.meter_state == :historical))
+    assert Enum.map(stale_additional, & &1.percent_label) == ["17%", "29%"]
 
     FakeUpstream.set_mode(upstream, {:path_json, %{"/api/codex/usage" => {200, payload}}})
 

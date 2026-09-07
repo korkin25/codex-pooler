@@ -12,6 +12,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.CloudflareCookies
   alias CodexPooler.Upstreams.EndpointMetadata
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.Windows
   alias CodexPooler.Upstreams.Reconciliation.PoolReconciliation
   alias CodexPooler.Upstreams.SavedResets
@@ -804,7 +805,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
        ) do
     identity
     |> Windows.list_evidence()
-    |> PostResetEvidence.classify(dispatched_at, later_datetime(now, now()))
+    |> PostResetEvidence.classify(
+      dispatched_at,
+      later_datetime(now, now()),
+      CredentialFencing.credential_epoch(identity)
+    )
     |> Kernel.==(:confirmed)
   end
 
@@ -2905,12 +2910,13 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
     post_reset_phase(
       Windows.list_evidence(refreshed_identity),
       consumed_at,
-      later_datetime(timestamp, now())
+      later_datetime(timestamp, now()),
+      CredentialFencing.credential_epoch(refreshed_identity)
     )
   end
 
-  defp post_reset_phase(evidence, consumed_at, timestamp) when is_list(evidence) do
-    case PostResetEvidence.classify(evidence, consumed_at, timestamp) do
+  defp post_reset_phase(evidence, consumed_at, timestamp, epoch) when is_list(evidence) do
+    case PostResetEvidence.classify(evidence, consumed_at, timestamp, epoch) do
       :confirmed -> RedemptionLifecycle.confirmed_by_quota()
       _pending_or_reblocked -> RedemptionLifecycle.consumed_pending_probe()
     end
@@ -2925,7 +2931,12 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
     decision_at = later_datetime(finished_at, now())
     evidence = Windows.list_evidence(identity)
 
-    {finalize_confirmation_phase(result, evidence, decision_at), evidence, decision_at}
+    {finalize_confirmation_phase(
+       result,
+       evidence,
+       decision_at,
+       CredentialFencing.credential_epoch(identity)
+     ), evidence, decision_at}
   end
 
   defp finalize_confirmation(_identity, result, _finished_at), do: {result, [], nil}
@@ -2933,16 +2944,17 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
   defp finalize_confirmation_phase(
          %{phase: "consumed_pending_probe", consumed_at: consumed_at} = result,
          evidence,
-         decision_at
+         decision_at,
+         epoch
        ) do
-    phase = post_reset_phase(evidence, consumed_at, decision_at)
+    phase = post_reset_phase(evidence, consumed_at, decision_at, epoch)
 
     result
     |> Map.put(:phase, phase)
     |> maybe_delete_pending_reason(phase)
   end
 
-  defp finalize_confirmation_phase(result, _evidence, _decision_at), do: result
+  defp finalize_confirmation_phase(result, _evidence, _decision_at, _epoch), do: result
 
   defp maybe_delete_pending_reason(result, "confirmed_by_quota"), do: Map.delete(result, :reason)
   defp maybe_delete_pending_reason(result, _phase), do: result

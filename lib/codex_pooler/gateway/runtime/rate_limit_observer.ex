@@ -9,6 +9,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserver do
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Quotas.Evidence
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.SavedResets.Convergence
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -171,6 +172,46 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserver do
   end
 
   def record_error(_identity, _body), do: :ok
+
+  @doc false
+  def record_provider_rejection(%UpstreamIdentity{} = identity, headers, body) do
+    at = DateTime.utc_now()
+    epoch = CredentialFencing.credential_epoch(identity)
+
+    windows =
+      Enum.flat_map(
+        rate_limit_error_payloads(body),
+        &CodexPooler.Upstreams.Quota.Evidence.codex_rate_limit_error_windows(&1, at)
+      ) ++
+        CodexPooler.Upstreams.Quota.Evidence.codex_header_windows(headers, at)
+
+    attrs =
+      windows
+      |> Enum.map(fn window ->
+        window
+        |> Map.put(:source, "codex_rate_limit_error")
+        |> Map.update!(
+          :metadata,
+          &Map.merge(&1, %{"runtime_provider_rejection" => true, "credential_epoch" => epoch})
+        )
+      end)
+      |> Enum.uniq_by(&Evidence.identity_key/1)
+
+    # The request identity captures the epoch used to dispatch. Check it under
+    # the existing credential lock, so a late failure cannot poison new credentials.
+    case CredentialFencing.guard_active_reconciliation_epoch(identity, epoch, fn current ->
+           QuotaWindows.upsert_quota_windows(current, attrs)
+         end) do
+      {:ok, :applied, current, stored} ->
+        maybe_converge_saved_reset(current, stored, "runtime_error")
+
+      {:ok, :superseded, _current, _stored} ->
+        :ok
+
+      {:error, reason} ->
+        log_failure("provider_rejection", identity_metadata(identity), reason)
+    end
+  end
 
   @spec log_failure(String.t(), observer_metadata(), term()) :: observer_result()
   def log_failure(operation, metadata, reason) do

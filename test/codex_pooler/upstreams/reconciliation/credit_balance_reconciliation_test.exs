@@ -15,7 +15,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
 
   setup :register_and_log_in_user
 
-  test "provider credit evidence survives fresh event selection in storage, admin and usage compatibility",
+  test "provider credit evidence stays authoritative despite fresh events in storage, admin and usage compatibility",
        %{conn: conn, scope: scope} do
     now = DateTime.utc_now()
     payload = payload(now)
@@ -77,7 +77,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
     snapshot_at = DateTime.utc_now()
     snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], snapshot_at)[identity.id]
 
-    assert [%{source: "codex_rate_limit_event"}] =
+    assert [%{source: "codex_usage_api"}] =
              RoutingQuotaSnapshot.effective_windows(snapshot)
 
     rows =
@@ -88,7 +88,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
         CreditBalanceStore.current(identity.metadata, epoch, snapshot_at)
       )
 
-    assert %{count_label: "0 credits", percent_label: "70%"} =
+    assert %{count_label: "0 credits", percent_label: "71%"} =
              Enum.find(rows, &(&1.key == :weekly))
 
     assert {:ok, %{credits: %{balance: "0", has_credits: false}}} =
@@ -148,16 +148,16 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
     refute has_element?(list_view, "#upstream-account-#{identity.id}-limit-weekly-count")
     refute has_element?(cockpit_view, "#upstream-quota-limit-weekly-count")
     # Distinct unelapsed provider resets and usage reports remain visible after
-    # credit counts disappear; neither parent may hide the uncertain quota row.
-    refute has_element?(list_view, "#upstream-account-#{identity.id}-limit-weekly-reset")
-    refute has_element?(cockpit_view, "#upstream-quota-limit-weekly-reset")
+    # credit counts disappear; the API reset remains the displayed reset.
+    assert has_element?(list_view, "#upstream-account-#{identity.id}-limit-weekly-reset")
+    assert has_element?(cockpit_view, "#upstream-quota-limit-weekly-reset")
 
     for {view, selector} <- [
           {list_view, "#upstream-account-#{identity.id}-limit-weekly"},
           {cockpit_view, "#upstream-quota-limit-weekly"}
         ] do
-      assert has_element?(view, "#{selector} [data-role='quota-source-disagreement']")
-      assert has_element?(view, "#{selector} [data-role='quota-reset-disagreement']")
+      refute has_element?(view, "#{selector} [data-role='quota-source-disagreement']")
+      refute has_element?(view, "#{selector} [data-role='quota-reset-disagreement']")
       assert has_element?(view, "#{selector} [data-source='codex_usage_api']")
       assert has_element?(view, "#{selector} [data-source='codex_rate_limit_event']")
     end

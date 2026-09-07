@@ -18,7 +18,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.AccountReconciliation do
 
   @stale_after_seconds 25 * 60
   @successful_partial_codes ~w(catalog_sync_failed catalog_sync_in_progress)
-  @catalog_sync_skipped_triggers ~w(scheduled gateway)
+  @catalog_sync_skipped_triggers ~w(scheduled gateway quota_source_disagreement)
   @active IdentityStatus.active_status()
   @paused IdentityStatus.paused_status()
   @refresh_failed IdentityStatus.refresh_failed_status()

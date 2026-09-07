@@ -75,7 +75,11 @@ defmodule CodexPooler.Quotas.ModelWeeklyResetSemantics do
          metadata when is_map(metadata) <- field(window, :metadata),
          percentage_kind when percentage_kind in [:zero, :positive] <-
            percentage_kind(field(window, :used_percent)) do
-      classify_metadata(metadata, percentage_kind)
+      if field(window, :source) == "codex_usage_api" do
+        :anchored
+      else
+        classify_metadata(metadata, percentage_kind)
+      end
     else
       _invalid -> :unknown
     end

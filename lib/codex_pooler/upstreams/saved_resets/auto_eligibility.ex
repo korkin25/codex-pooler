@@ -5,6 +5,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
 
   alias CodexPooler.Quotas.WindowClassifier
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows
   alias CodexPooler.Upstreams.Quota.WindowSelector
@@ -257,6 +258,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
         quota_scope
         |> Map.to_list()
         |> Keyword.put(:at, timestamp)
+        |> Keyword.put(:credential_epoch, CredentialFencing.credential_epoch(identity))
       )
 
     eligibility.eligible? and

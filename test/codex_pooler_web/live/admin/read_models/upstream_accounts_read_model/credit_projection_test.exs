@@ -7,10 +7,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.CreditProjectionTest do
 
   @now ~U[2026-09-01 12:00:00Z]
 
-  test "fresh account credits survive a quota source switch without changing selected percentage" do
+  test "account credits accompany API percentage without falling back to event quota" do
     usage = window("codex_usage_api", 29, DateTime.add(@now, -6), 0)
     event = window("codex_rate_limit_event", 30, @now, nil)
-    assert [^event] = WindowSelector.logical_windows([usage, event], @now)
+    assert [^usage] = WindowSelector.logical_windows([usage, event], @now)
 
     metadata =
       CreditBalanceStore.transition(%{}, %{"credits" => %{"balance" => 0}}, usage.observed_at, 2)
@@ -27,8 +27,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.CreditProjectionTest do
         )
 
       weekly = Enum.find(rows, &(&1.key == :weekly))
-      assert weekly.count_label == "0 credits"
-      assert weekly.percent_label == if(windows == [usage], do: "71%", else: "70%")
+      assert weekly.count_label == if(windows == [event], do: nil, else: "0 credits")
+      assert weekly.percent_label == if(windows == [event], do: "not reported", else: "71%")
     end
   end
 

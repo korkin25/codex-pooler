@@ -7,8 +7,10 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Jobs
   alias CodexPooler.Jobs.UpstreamEnqueue
+  alias CodexPooler.Quotas.Evidence.CodexParsers.RateLimitReachedType
   alias CodexPooler.Upstreams.SavedResets.ProbeLease
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
 
@@ -59,6 +61,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
   def observe_http_response(%SelectedCandidateContext{identity: identity}, response, body) do
     RateLimitObserver.record_headers(identity, response)
     RateLimitObserver.record_error(identity, body)
+    observe_provider_rejection(identity, response.headers, body, response.status)
     :ok
   end
 
@@ -85,6 +88,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
       end
 
     RateLimitObserver.commit_events(identity, rate_limit_state)
+    observe_provider_rejection(identity, response.headers, body, response.status)
 
     :ok
   end
@@ -101,8 +105,58 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SideEffects do
       Map.get(response, :websocket_frame_headers, %{})
     )
 
+    headers =
+      websocket_upgrade_headers(response) ++
+        Map.to_list(Map.get(response, :websocket_frame_headers, %{}))
+
+    status =
+      case response do
+        %{reason: {:websocket_upgrade_failed, status, _headers}} -> status
+        _response -> Map.get(response, :status, 101)
+      end
+
+    observe_provider_rejection(identity, headers, Map.get(response, :body, ""), status)
+
     :ok
   end
+
+  # A header marker on a successful response is only a diagnostic. Persist a
+  # rejection fact only after an actual HTTP error or parsed failed terminal.
+  defp observe_provider_rejection(identity, headers, body, status) do
+    code = provider_failure_code(body, status)
+
+    if quota_rejection?(status, code, headers) do
+      RateLimitObserver.record_provider_rejection(identity, headers, body)
+    end
+
+    :ok
+  end
+
+  defp provider_failure_code(body, status) do
+    case StreamProtocol.terminal_failure(body) do
+      {:ok, failure} -> failure.upstream_code || failure.code
+      _no_terminal -> http_error_code(body, status)
+    end
+  end
+
+  defp http_error_code(body, status) when is_integer(status) and status >= 400 do
+    case Jason.decode(body) do
+      {:ok, %{"error" => %{"code" => code}}} -> code
+      _not_json -> nil
+    end
+  end
+
+  defp http_error_code(_body, _status), do: nil
+
+  defp quota_rejection?(status, code, headers) do
+    status == 429 or code in ~w(rate_limit_exceeded usage_limit_exceeded usage_limit_reached) or
+      not is_nil(RateLimitReachedType.parse(code)) or rejected_header?(status, headers)
+  end
+
+  defp rejected_header?(status, headers) when is_integer(status) and status >= 400,
+    do: not is_nil(RateLimitReachedType.parse_header(headers))
+
+  defp rejected_header?(_status, _headers), do: false
 
   defp websocket_upgrade_headers(%{reason: {:websocket_upgrade_failed, status, headers}})
        when is_integer(status) and is_list(headers),

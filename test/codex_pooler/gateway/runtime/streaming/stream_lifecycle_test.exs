@@ -2777,7 +2777,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamLifecycleTest do
 
   defp replay_quota_observations(identity) do
     identity
-    |> QuotaWindows.list_quota_windows()
+    |> QuotaWindows.list_evidence()
     |> Enum.filter(
       &(&1.source in [
           "codex_response_headers",

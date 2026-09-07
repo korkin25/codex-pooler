@@ -370,7 +370,7 @@ defmodule CodexPooler.Jobs.AccountPrimingJobsTest do
               "reset_at" => DateTime.to_iso8601(reset_at),
               "observed_at" => DateTime.to_iso8601(observed_at),
               "last_sync_at" => DateTime.to_iso8601(observed_at),
-              "source" => "local_reconciliation",
+              "source" => "codex_usage_api",
               "source_precision" => "observed",
               "quota_scope" => "account",
               "quota_family" => "account",

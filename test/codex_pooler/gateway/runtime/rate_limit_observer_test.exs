@@ -8,11 +8,230 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
   alias CodexPooler.Accounting.{RequestReplay, RequestReplayEntitlement}
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.SessionContinuity
+  alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
+  alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
   alias CodexPooler.Gateway.Websocket
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
+  alias CodexPooler.Upstreams.SavedResets.AutoEligibility
+  alias CodexPooler.Upstreams.SavedResets.Convergence
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+
+  test "successful HTTP and websocket marker headers cannot reblock a consumed reset" do
+    for transport <- [:http, :websocket] do
+      identity = pending_reset_identity()
+
+      context =
+        struct(SelectedCandidateContext, identity: identity)
+
+      headers = rejection_headers()
+
+      body =
+        Jason.encode!(%{"type" => "response.completed", "response" => %{"status" => "completed"}})
+
+      case transport do
+        :http ->
+          SideEffects.observe_http_response(
+            context,
+            %Req.Response{status: 200, headers: headers},
+            body
+          )
+
+        :websocket ->
+          SideEffects.observe_websocket_response(
+            context,
+            %{status: 101, headers: Map.to_list(headers), body: body}
+          )
+      end
+
+      assert redemption_phase(identity) == "consumed_pending_probe"
+
+      refute Enum.any?(
+               QuotaWindows.list_evidence(identity),
+               &(&1.metadata["runtime_provider_rejection"] == true)
+             )
+    end
+  end
+
+  test "actual HTTP SSE and websocket quota failures persist bounded rejection evidence" do
+    for transport <- [:http, :sse, :websocket] do
+      identity = pending_reset_identity()
+
+      context =
+        struct(SelectedCandidateContext, identity: identity)
+
+      headers = rejection_headers()
+
+      body =
+        Jason.encode!(%{
+          "type" => "response.failed",
+          "response" => %{"status" => "failed", "error" => %{"code" => "usage_limit_exceeded"}}
+        })
+
+      case transport do
+        :http ->
+          SideEffects.observe_http_response(
+            context,
+            %Req.Response{status: 429, headers: headers},
+            Jason.encode!(%{"error" => %{"code" => "rate_limit_exceeded"}})
+          )
+
+        :sse ->
+          SideEffects.observe_stream_response(
+            context,
+            %Req.Response{status: 200, headers: headers},
+            "data: " <> body <> "\n\n",
+            nil
+          )
+
+        :websocket ->
+          SideEffects.observe_websocket_response(
+            context,
+            %{status: 101, headers: [], websocket_frame_headers: headers, body: body}
+          )
+      end
+
+      assert redemption_phase(identity) == "reblocked"
+
+      assert Enum.any?(
+               QuotaWindows.list_evidence(identity),
+               &(&1.source == "codex_rate_limit_error" and
+                   &1.metadata["runtime_provider_rejection"] == true)
+             )
+
+      assert_api_confirmation(identity)
+    end
+  end
+
+  test "late provider rejection cannot cross credential rotation and stored rejection expires with its epoch" do
+    old_identity = pending_reset_identity()
+
+    rotated =
+      old_identity
+      |> Ecto.Changeset.change(metadata: CredentialFencing.advance_credential_epoch(old_identity))
+      |> Repo.update!()
+
+    assert :ok =
+             RateLimitObserver.record_provider_rejection(old_identity, rejection_headers(), "{}")
+
+    refute Enum.any?(
+             QuotaWindows.list_evidence(rotated),
+             &(&1.metadata["runtime_provider_rejection"] == true)
+           )
+
+    assert redemption_phase(rotated) == "consumed_pending_probe"
+    at = DateTime.utc_now() |> DateTime.add(-60)
+
+    assert {:ok, [_]} =
+             QuotaWindows.upsert_quota_windows(rotated, [
+               %{
+                 quota_key: "account",
+                 quota_scope: "account",
+                 quota_family: "account",
+                 window_kind: "secondary",
+                 window_minutes: 10_080,
+                 used_percent: Decimal.new(0),
+                 reset_at: DateTime.add(at, 86_400),
+                 observed_at: at,
+                 source: "codex_usage_api",
+                 freshness_state: "fresh"
+               }
+             ])
+
+    assert :ok = RateLimitObserver.record_provider_rejection(rotated, rejection_headers(), "{}")
+    assert redemption_phase(rotated) == "reblocked"
+
+    refute AutoEligibility.locked_sibling_usable_capacity?(
+             Repo.reload!(rotated),
+             %{quota_scope: %{}},
+             DateTime.utc_now()
+           )
+
+    assert [_] = QuotaWindows.quota_window_selection_data(rotated).provider_rejections
+
+    rotated_again = Repo.reload!(rotated)
+
+    rotated_again =
+      rotated_again
+      |> Ecto.Changeset.change(
+        metadata: CredentialFencing.advance_credential_epoch(rotated_again)
+      )
+      |> Repo.update!()
+
+    assert [] = QuotaWindows.quota_window_selection_data(rotated_again).provider_rejections
+
+    assert AutoEligibility.locked_sibling_usable_capacity?(
+             rotated_again,
+             %{quota_scope: %{}},
+             DateTime.utc_now()
+           )
+
+    # Raw diagnostics remain inspectable, while a stale epoch cannot settle a
+    # new pending lifecycle or spend another credit.
+    assert Enum.any?(
+             QuotaWindows.list_evidence(rotated_again),
+             &(&1.metadata["runtime_provider_rejection"] == true)
+           )
+
+    metadata =
+      put_in(
+        rotated_again.metadata,
+        ["saved_reset_redemption", "phase"],
+        "consumed_pending_probe"
+      )
+
+    rotated_again = rotated_again |> Ecto.Changeset.change(metadata: metadata) |> Repo.update!()
+    Convergence.converge(rotated_again, DateTime.utc_now(), "epoch_test")
+    assert redemption_phase(rotated_again) == "confirmed_by_quota"
+  end
+
+  test "unmarked error observations cannot refresh or replace a trusted rejection" do
+    identity = pending_reset_identity()
+    assert :ok = RateLimitObserver.record_provider_rejection(identity, rejection_headers(), "{}")
+
+    current =
+      Enum.find(
+        QuotaWindows.list_evidence(identity),
+        &(&1.metadata["runtime_provider_rejection"] == true)
+      )
+
+    fields = [:id, :used_percent, :reset_at, :observed_at, :last_sync_at, :metadata]
+    baseline = Map.take(current, fields)
+
+    for metadata <- [%{}, %{"credential_epoch" => 0}, %{"runtime_provider_rejection" => false}] do
+      attrs =
+        current
+        |> Map.from_struct()
+        |> Map.merge(%{
+          metadata: metadata,
+          observed_at: DateTime.add(current.observed_at, 60),
+          last_sync_at: DateTime.add(current.last_sync_at, 60),
+          reset_at: DateTime.add(current.reset_at, 60),
+          used_percent: Decimal.new(0)
+        })
+
+      assert {:ok, [unchanged]} = QuotaWindows.upsert_quota_windows(identity, [attrs])
+      assert Map.take(unchanged, fields) == baseline
+    end
+
+    assert :ok = RateLimitObserver.record_provider_rejection(identity, rejection_headers(), "{}")
+    fresh = Repo.reload!(current)
+    assert DateTime.compare(fresh.observed_at, current.observed_at) == :gt
+    assert fresh.metadata["runtime_provider_rejection"] == true
+    assert redemption_phase(identity) == "reblocked"
+  end
+
+  defp rejection_headers do
+    %{
+      "x-codex-rate-limit-reached-type" => "workspace_owner_usage_limit_reached",
+      "x-codex-secondary-used-percent" => "100",
+      "x-codex-secondary-window-minutes" => "10080",
+      "x-codex-secondary-reset-at" =>
+        DateTime.utc_now() |> DateTime.add(86_400) |> DateTime.to_iso8601()
+    }
+  end
 
   describe "record_complete_events/2" do
     test "records a whole event payload without exposing streaming state" do
@@ -82,7 +301,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
       wait_for_rate_limit_event_tasks()
 
       refute identity
-             |> QuotaWindows.list_quota_windows()
+             |> QuotaWindows.list_evidence()
              |> Enum.any?(&(&1.source == "codex_rate_limit_event"))
     end
 
@@ -330,7 +549,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
       assert [window] =
                fixture.identity
-               |> QuotaWindows.list_quota_windows()
+               |> QuotaWindows.list_evidence()
                |> Enum.filter(
                  &(&1.source == "codex_rate_limit_event" and &1.window_kind == "primary")
                )
@@ -340,9 +559,9 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
     end
   end
 
-  describe "saved reset convergence from runtime evidence" do
+  describe "saved reset runtime diagnostics wait for API confirmation" do
     @tag :rate_limit_runtime
-    test "threads each runtime evidence source into committed convergence telemetry" do
+    test "every runtime source leaves the consumed latch pending until API confirmation" do
       scenarios = [
         {"runtime_headers",
          fn identity ->
@@ -386,20 +605,30 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
         assert :ok = observe.(identity)
 
-        assert_receive {^handler_id, %{count: 1},
-                        %{source: ^source, outcome: "confirmed_by_quota"}},
-                       1_000
+        refute_received {^handler_id, _measurements, _metadata}
+        assert redemption_phase(identity) == "consumed_pending_probe"
 
-        redemption = persisted_redemption(identity)
-        assert redemption["convergence_source"] == source
-        assert redemption["convergence_outcome"] == "confirmed_by_quota"
+        assert [_job] =
+                 all_enqueued(
+                   worker: CodexPooler.Jobs.AccountReconciliationWorker,
+                   args: %{upstream_identity_id: identity.id}
+                 )
+
+        assert_api_confirmation(identity)
+
+        assert_receive {^handler_id, %{count: 1},
+                        %{source: "reconciliation", outcome: "confirmed_by_quota"}}
+
+        assert persisted_redemption(identity)["convergence_source"] == "reconciliation"
+
+        assert source in ~w(runtime_headers runtime_websocket_upgrade_headers runtime_websocket_frame_headers runtime_error runtime_event)
       end
 
       refute_received {^handler_id, _measurements, _metadata}
       wait_for_rate_limit_event_tasks()
     end
 
-    test "exhausted weekly headers reblock a pending reset immediately" do
+    test "exhausted weekly headers leave a consumed reset pending" do
       identity = pending_reset_identity()
 
       assert :ok =
@@ -407,10 +636,10 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  headers: weekly_headers("100")
                })
 
-      assert redemption_phase(identity) == "reblocked"
+      assert redemption_phase(identity) == "consumed_pending_probe"
     end
 
-    test "usable weekly headers confirm a pending reset immediately" do
+    test "usable weekly headers leave a consumed reset pending until API confirmation" do
       identity = pending_reset_identity()
 
       assert :ok =
@@ -418,10 +647,11 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  headers: weekly_headers("4")
                })
 
-      assert redemption_phase(identity) == "confirmed_by_quota"
+      assert redemption_phase(identity) == "consumed_pending_probe"
+      assert_api_confirmation(identity)
     end
 
-    test "later usable weekly headers confirm an applied reblocked reset immediately" do
+    test "later usable weekly headers leave an applied reblock pending API confirmation" do
       identity = pending_reset_identity("reblocked")
 
       assert :ok =
@@ -429,7 +659,8 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  headers: weekly_headers("4")
                })
 
-      assert redemption_phase(identity) == "confirmed_by_quota"
+      assert redemption_phase(identity) == "reblocked"
+      assert_api_confirmation(identity)
     end
 
     test "later usable weekly headers leave a non-applied reblock unchanged" do
@@ -463,7 +694,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
       refute Map.has_key?(persisted.metadata || %{}, "saved_reset_redemption")
     end
 
-    test "websocket frame headers drive the same convergence" do
+    test "websocket frame headers cannot settle a consumed reset" do
       identity = pending_reset_identity()
 
       assert :ok =
@@ -472,11 +703,11 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  Map.new(weekly_headers("100"))
                )
 
-      assert redemption_phase(identity) == "reblocked"
+      assert redemption_phase(identity) == "consumed_pending_probe"
     end
 
     @tag :saved_reset_stale_snapshot_contract
-    test "usable synchronous headers converge a DB-authoritative applied reblock" do
+    test "usable synchronous headers preserve a DB-authoritative applied reblock until API confirmation" do
       stale_identity = stale_snapshot_after_applied_reblock()
 
       assert redemption_phase(stale_identity) == "reblocked"
@@ -486,11 +717,12 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  headers: weekly_headers("4")
                })
 
-      assert redemption_phase(stale_identity) == "confirmed_by_quota"
+      assert redemption_phase(stale_identity) == "reblocked"
+      assert_api_confirmation(stale_identity)
     end
 
     @tag :saved_reset_stale_snapshot_contract
-    test "usable websocket upgrade headers converge a DB-authoritative applied reblock" do
+    test "usable websocket upgrade headers preserve a DB-authoritative applied reblock until API confirmation" do
       stale_identity = stale_snapshot_after_applied_reblock()
 
       assert redemption_phase(stale_identity) == "reblocked"
@@ -501,11 +733,12 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  weekly_headers("4")
                )
 
-      assert redemption_phase(stale_identity) == "confirmed_by_quota"
+      assert redemption_phase(stale_identity) == "reblocked"
+      assert_api_confirmation(stale_identity)
     end
 
     @tag :saved_reset_stale_snapshot_contract
-    test "usable websocket frame headers converge a DB-authoritative applied reblock" do
+    test "usable websocket frame headers preserve a DB-authoritative applied reblock until API confirmation" do
       stale_identity = stale_snapshot_after_applied_reblock()
 
       assert redemption_phase(stale_identity) == "reblocked"
@@ -516,11 +749,12 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  Map.new(weekly_headers("4"))
                )
 
-      assert redemption_phase(stale_identity) == "confirmed_by_quota"
+      assert redemption_phase(stale_identity) == "reblocked"
+      assert_api_confirmation(stale_identity)
     end
 
     @tag :saved_reset_stale_snapshot_contract
-    test "usable async codex.rate_limits evidence converges a DB-authoritative applied reblock" do
+    test "usable async codex.rate_limits evidence preserves a DB-authoritative applied reblock until API confirmation" do
       stale_identity = stale_snapshot_after_applied_reblock()
       reset_at = DateTime.add(DateTime.utc_now(), 3, :minute) |> DateTime.truncate(:second)
 
@@ -534,7 +768,8 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                  )
                end)
 
-      assert redemption_phase(stale_identity) == "confirmed_by_quota"
+      assert redemption_phase(stale_identity) == "reblocked"
+      assert_api_confirmation(stale_identity)
     end
 
     @tag :saved_reset_stale_snapshot_contract
@@ -549,7 +784,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
       assert redemption_phase(stale_identity) == "reblocked"
 
-      assert Enum.any?(QuotaWindows.list_quota_windows(stale_identity), fn window ->
+      assert Enum.any?(QuotaWindows.list_evidence(stale_identity), fn window ->
                window.source == "codex_rate_limit_error" and window.quota_key == "account" and
                  Decimal.equal?(window.used_percent, Decimal.new("100"))
              end)
@@ -711,6 +946,37 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
         }
       }
     }
+  end
+
+  defp assert_api_confirmation(identity) do
+    at = DateTime.utc_now()
+
+    assert {:ok, [_]} =
+             QuotaWindows.upsert_quota_windows(identity, [
+               %{
+                 quota_key: "account",
+                 quota_scope: "account",
+                 quota_family: "account",
+                 window_kind: "secondary",
+                 window_minutes: 10_080,
+                 used_percent: Decimal.new(4),
+                 reset_at: DateTime.add(at, 600),
+                 observed_at: at,
+                 last_sync_at: at,
+                 source: "codex_usage_api",
+                 source_precision: "observed",
+                 freshness_state: "fresh"
+               }
+             ])
+
+    assert {:ok, :confirmed_by_quota} =
+             Convergence.converge(
+               identity,
+               at,
+               "reconciliation"
+             )
+
+    assert redemption_phase(identity) == "confirmed_by_quota"
   end
 
   defp pending_reset_identity(phase \\ "consumed_pending_probe", overrides \\ %{}) do
@@ -985,7 +1251,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
     deadline = deadline || System.monotonic_time(:millisecond) + 1_000
 
     identity
-    |> QuotaWindows.list_quota_windows()
+    |> QuotaWindows.list_evidence()
     |> Enum.find(&(&1.source == "codex_rate_limit_event" and &1.window_kind == window_kind))
     |> case do
       nil ->

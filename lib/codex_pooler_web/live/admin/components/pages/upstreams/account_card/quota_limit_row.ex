@@ -21,24 +21,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
         </span>
         <span class={[quota_limit_percent_class(@limit), "shrink-0"]}>{@limit.percent_label}</span>
       </div>
-      <p
-        :if={Map.get(@limit, :source_disagreement, false)}
-        data-role="quota-source-disagreement"
-        class="text-xs text-warning"
-      >
-        Sources disagree; remaining quota is uncertain. Routing currently selects {Map.get(
-          @limit,
-          :selected_percent_label
-        )} remaining
-        ({Map.get(@limit, :selected_source)}).
-      </p>
-      <p
-        :if={Map.get(@limit, :reset_disagreement, false)}
-        class="text-xs text-warning"
-        data-role="quota-reset-disagreement"
-      >
-        Reset reports differ; no single reset is confirmed.
-      </p>
       <progress
         id={"#{@id}-progress"}
         data-role="upstream-limit-progress"
@@ -87,13 +69,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
       </div>
       <details
         :if={Map.get(@limit, :observations, []) != []}
-        open={
-          Map.get(@limit, :source_disagreement, false) or Map.get(@limit, :reset_disagreement, false)
-        }
         class="text-[11px]"
         data-role="quota-source-observations"
       >
-        <summary class="cursor-pointer">Source observations (UTC)</summary>
+        <summary class="cursor-pointer">Source diagnostics (UTC)</summary>
         <ul class="mt-1 grid gap-2">
           <li
             :for={observation <- Map.get(@limit, :observations, [])}

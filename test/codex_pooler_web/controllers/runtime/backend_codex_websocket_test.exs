@@ -13471,7 +13471,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketTest do
     deadline = deadline || System.monotonic_time(:millisecond) + 1_000
 
     identity
-    |> QuotaWindows.list_quota_windows()
+    |> QuotaWindows.list_evidence()
     |> Enum.find(&(&1.source == "codex_response_headers" and &1.window_kind == window_kind))
     |> case do
       nil ->

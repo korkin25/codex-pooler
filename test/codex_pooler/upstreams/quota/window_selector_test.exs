@@ -1,6 +1,41 @@
 defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
   use ExUnit.Case, async: true
 
+  test "provider rejection fences only the same full meter and credential epoch" do
+    now = DateTime.utc_now()
+
+    error = %CodexPooler.Upstreams.Quota.AccountQuotaWindow{
+      quota_key: "reserve",
+      quota_scope: "feature",
+      quota_family: "additional_limit",
+      raw_metered_feature: "meter-a",
+      source: "codex_rate_limit_error",
+      window_kind: "primary",
+      window_minutes: 10_080,
+      used_percent: Decimal.new(100),
+      observed_at: DateTime.add(now, -1),
+      last_sync_at: now,
+      reset_at: DateTime.add(now, 3600),
+      freshness_state: "fresh",
+      metadata: %{"runtime_provider_rejection" => true, "credential_epoch" => 2}
+    }
+
+    api = %{
+      error
+      | source: "codex_usage_api",
+        window_kind: "secondary",
+        used_percent: Decimal.new(0),
+        observed_at: now
+    }
+
+    other = %{api | raw_metered_feature: "meter-b"}
+    selector = CodexPooler.Upstreams.Quota.WindowSelector
+    assert [^error] = selector.current_provider_rejections([error, other], now, 2)
+    assert [] = selector.current_provider_rejections([error, api, other], now, 2)
+    assert [] = selector.current_provider_rejections([error], now, 3)
+    assert [] = selector.current_provider_rejections([error], now, nil)
+  end
+
   alias CodexPooler.Quotas.AdditionalMeterIdentity
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.WindowSelector
@@ -147,7 +182,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
            ]
   end
 
-  test "same-cycle rows with countdown jitter are not rejected" do
+  test "header countdown jitter cannot replace the API snapshot" do
     # Resets within the margin describe the same running cycle.
     fresh_zero =
       account_window(
@@ -169,12 +204,11 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
         observed_at: DateTime.add(@as_of, -30, :second)
       )
 
-    # Both survive the cycle filter; the winner is chosen by the normal score
-    # (pressure prefers the measured 12%).
-    assert WindowSelector.logical_windows([fresh_zero, jittered], @as_of) == [jittered]
+    # Header pressure remains diagnostic despite its later observation.
+    assert WindowSelector.logical_windows([fresh_zero, jittered], @as_of) == [fresh_zero]
   end
 
-  test "fresh exhausted runtime evidence outranks usable usage evidence in one logical window" do
+  test "fresh exhausted runtime evidence does not override API quota" do
     usage =
       account_window(
         window_kind: "secondary",
@@ -196,11 +230,11 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
       )
 
     assert WindowSelector.logical_windows([usage, exhausted_headers], @as_of) == [
-             exhausted_headers
+             usage
            ]
   end
 
-  test "anchored runtime Spark evidence remains selected over newer floating usage evidence" do
+  test "Spark selects API floating semantics over runtime anchors" do
     floating_usage =
       spark_window(
         source: "codex_usage_api",
@@ -221,7 +255,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
       )
 
     assert WindowSelector.logical_windows([floating_usage, anchored_runtime], @as_of) == [
-             anchored_runtime
+             floating_usage
            ]
   end
 
@@ -287,7 +321,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
 
     assert WindowSelector.logical_key(usage) == expected_key
     assert WindowSelector.logical_key(headers) == expected_key
-    assert WindowSelector.logical_windows([usage, headers], @as_of) == [headers]
+    assert WindowSelector.logical_windows([usage, headers], @as_of) == [usage]
   end
 
   test "same additional meter from different sources folds into one meter-aware group" do
@@ -311,7 +345,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
         used_percent: Decimal.new("17")
       )
 
-    assert WindowSelector.logical_windows([usage, headers], @as_of) == [headers]
+    assert WindowSelector.logical_windows([usage, headers], @as_of) == [usage]
   end
 
   test "mixed rich and generic additional rows are deterministic in every writer order" do
@@ -597,7 +631,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
            ]
   end
 
-  test "semantic rank stays behind pressure for positive and exhausted Spark evidence" do
+  test "runtime Spark pressure does not override the API snapshot" do
     floating = qf001_explicit_floating()
 
     for used_percent <- [Decimal.new("12"), Decimal.new("100")] do
@@ -607,11 +641,11 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
           used_percent: used_percent
         )
 
-      assert WindowSelector.logical_windows([floating, pressure], @qf_as_of) == [pressure]
+      assert WindowSelector.logical_windows([floating, pressure], @qf_as_of) == [floating]
     end
   end
 
-  test "fresh evidence still beats stale pressure while all-stale pressure remains pessimistic" do
+  test "stale API values keep their own age even beside newer header pressure" do
     fresh_zero =
       qf001_explicit_floating(
         id: "10000000-0000-4000-8000-000000000001",
@@ -639,7 +673,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
            ]
 
     assert WindowSelector.logical_windows([stale_lower, stale_exhausted], @qf_as_of) == [
-             stale_exhausted
+             stale_lower
            ]
   end
 

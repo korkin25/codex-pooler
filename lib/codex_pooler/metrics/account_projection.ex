@@ -174,6 +174,7 @@ defmodule CodexPooler.Metrics.AccountProjection do
   end
 
   defp account_evidence(snapshot, windows, labels) do
+    windows = Enum.filter(windows, &(&1.source == "codex_usage_api"))
     as_of = snapshot.as_of
     availability = snapshot.availability
     current = availability && availability.credential_epoch == snapshot.credential_epoch

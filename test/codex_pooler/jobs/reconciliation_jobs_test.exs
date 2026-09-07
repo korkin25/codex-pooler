@@ -261,8 +261,9 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
               "window_minutes" => 300,
               "active_limit" => 100,
               "credits" => 75,
+              "used_percent" => 25,
               "reset_at" => DateTime.to_iso8601(future_reset),
-              "source" => "local_reconciliation",
+              "source" => "codex_usage_api",
               "freshness_state" => "fresh"
             }
           ]
@@ -2299,9 +2300,10 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
               "window_minutes" => 300,
               "active_limit" => 100,
               "credits" => 75,
+              "used_percent" => 25,
               "reset_at" =>
                 DateTime.utc_now() |> DateTime.add(3_600, :second) |> DateTime.to_iso8601(),
-              "source" => "local_reconciliation",
+              "source" => "codex_usage_api",
               "freshness_state" => "fresh"
             }
           ]
@@ -2313,8 +2315,10 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
                Repo.transaction(fn ->
                  assert Repo.in_transaction?()
 
-                 assert {:ok, %{status: :succeeded}} =
+                 assert {:ok, %{status: :succeeded} = result} =
                           AccountReconciliation.run(pool.id, assignment.id, "scheduled")
+
+                 assert result.assignment.metadata["quota_priming"]["status"] == "known"
 
                  refute_receive {Events,
                                  %{
@@ -5350,20 +5354,20 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
       assert {:ok, [_window]} =
                QuotaWindows.upsert_quota_windows(identity, [later_window_attrs])
 
-      assert {:ok, :unchanged} = Convergence.converge(identity, later_at)
+      assert {:ok, :confirmed_by_quota} = Convergence.converge(identity, later_at)
 
-      confirmed_at = DateTime.add(later_at, 1, :second)
+      repeated_at = DateTime.add(later_at, 1, :second)
 
       assert {:ok, [_window]} =
                QuotaWindows.upsert_quota_windows(identity, [
                  %{
                    later_window_attrs
-                   | observed_at: confirmed_at,
-                     last_sync_at: confirmed_at
+                   | observed_at: repeated_at,
+                     last_sync_at: repeated_at
                  }
                ])
 
-      assert {:ok, :confirmed_by_quota} = Convergence.converge(identity, confirmed_at)
+      assert {:ok, :unchanged} = Convergence.converge(identity, repeated_at)
 
       recovered =
         Repo.get!(UpstreamIdentity, identity.id).metadata["saved_reset_redemption"]
@@ -6319,11 +6323,12 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
                          "window_minutes" => 300,
                          "active_limit" => 100,
                          "credits" => 75,
+                         "used_percent" => 25,
                          "reset_at" =>
                            DateTime.utc_now()
                            |> DateTime.add(3_600, :second)
                            |> DateTime.to_iso8601(),
-                         "source" => "local_reconciliation",
+                         "source" => "codex_usage_api",
                          "freshness_state" => "fresh"
                        }
                      ]

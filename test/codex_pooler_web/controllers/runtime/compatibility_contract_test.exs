@@ -3953,7 +3953,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("1"),
                  reset_at: reset_at,
-                 source: "codex_response_headers",
+                 source: "codex_usage_api",
                  source_precision: "observed",
                  freshness_state: "fresh"
                }

@@ -36,6 +36,7 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
 
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows
+  alias CodexPooler.Upstreams.Quota.WindowSelector
 
   @account_quota_key "account"
   # A window carrying "unknown" precision was not parsed into a trustworthy
@@ -54,7 +55,10 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
   account window to be usable.
   """
   @spec classify([AccountQuotaWindow.t()], DateTime.t(), DateTime.t()) :: classification()
-  def classify(windows, %DateTime{} = consumed_at, %DateTime{} = now) when is_list(windows) do
+  def classify(windows, consumed_at, now, credential_epoch \\ nil)
+
+  def classify(windows, %DateTime{} = consumed_at, %DateTime{} = now, credential_epoch)
+      when is_list(windows) do
     fresh_account_windows =
       windows
       |> Enum.filter(&observed_at_or_after?(&1, consumed_at))
@@ -62,6 +66,7 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
       |> Enum.filter(fn window -> account_window?(window) and parse_safe?(window) end)
 
     cond do
+      provider_reblocked?(windows, consumed_at, now, credential_epoch) -> :reblocked
       fresh_account_windows == [] -> :pending
       Enum.any?(fresh_account_windows, &exhausted?(&1, now)) -> :reblocked
       Enum.all?(fresh_account_windows, &Windows.usable_window?(&1, now)) -> :confirmed
@@ -69,7 +74,25 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
     end
   end
 
-  defp account_window?(%AccountQuotaWindow{quota_key: @account_quota_key}), do: true
+  # An actual quota rejection still settles the guarded probe as failed.
+  # Runtime usage/header observations cannot confirm capacity; an error is a
+  # separate lifecycle fact, superseded only by a newer API report for its meter.
+  defp provider_reblocked?(windows, consumed_at, now, credential_epoch) do
+    windows
+    |> WindowSelector.current_provider_rejections(now, credential_epoch)
+    |> Enum.any?(fn window ->
+      account_window?(window) and parse_safe?(window) and
+        observed_at_or_after?(window, consumed_at)
+    end)
+  end
+
+  defp account_window?(%AccountQuotaWindow{
+         quota_key: @account_quota_key,
+         quota_scope: "account",
+         quota_family: "account"
+       }),
+       do: true
+
   defp account_window?(_window), do: false
 
   defp parse_safe?(%AccountQuotaWindow{source_precision: @unparseable_precision}), do: false

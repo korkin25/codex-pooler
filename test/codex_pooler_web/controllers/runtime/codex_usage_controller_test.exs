@@ -76,7 +76,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("100"),
                  reset_at: DateTime.add(DateTime.utc_now(), 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh"
                }
              ])
@@ -88,7 +88,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("12"),
                  reset_at: DateTime.add(DateTime.utc_now(), 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh"
                }
              ])
@@ -236,7 +236,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
     assert %{"used_percent" => 100} = rate_limit["secondary_window"]
   end
 
-  test "GET /api/codex/usage follows a confirmed fixed-anchor weekly reset", %{conn: conn} do
+  test "GET /api/codex/usage follows the first newer API weekly reset", %{conn: conn} do
     setup = usage_reset_identity_fixture()
     %{identity: identity, observed_at: observed_at, reset_at: reset_at} = setup
 
@@ -262,9 +262,11 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
              )
 
     pending = Repo.get!(AccountQuotaWindow, canonical.id)
-    assert Decimal.equal?(pending.used_percent, Decimal.new("100"))
-    assert_exhausted_routing(identity, pending, candidate_at)
-    assert_exhausted_usage_response(conn, setup)
+    assert Decimal.equal?(pending.used_percent, Decimal.new("0"))
+    assert %{eligible?: true} = QuotaWindows.routing_quota_eligibility(identity, at: candidate_at)
+
+    assert %{"rate_limit" => %{"secondary_window" => %{"used_percent" => 0}}} =
+             usage_response(conn, setup)
 
     confirmed_at = DateTime.add(candidate_at, 180, :second)
 
@@ -298,61 +300,44 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
            } = usage_response(recycle(conn), setup)
   end
 
-  test "GET /api/codex/usage keeps contradictory and replayed weekly resets exhausted", %{
+  test "GET /api/codex/usage preserves latest API values against old and equal responses", %{
     conn: conn
   } do
-    cases = [
-      {:contradictory,
-       fn candidate_at, confirmed_at, reset_at ->
-         {
-           weekly_quota_evidence(candidate_at, reset_at, "0", safe_status()),
-           weekly_quota_evidence(confirmed_at, reset_at, "0", %{
-             "rate_limit_allowed" => true,
-             "rate_limit_reached" => true
-           })
-         }
-       end},
-      {:replayed,
-       fn candidate_at, confirmed_at, reset_at ->
-         {
-           safe_weekly_zero(candidate_at, reset_at),
-           safe_weekly_zero(confirmed_at, reset_at, provider_at: candidate_at)
-         }
-       end}
-    ]
+    setup = usage_reset_identity_fixture()
+    %{identity: identity, observed_at: observed_at, reset_at: reset_at} = setup
 
-    Enum.reduce(cases, conn, fn {_name, observations_for}, current_conn ->
-      setup = usage_reset_identity_fixture()
-      %{identity: identity, observed_at: observed_at, reset_at: reset_at} = setup
+    assert {:ok, canonical} =
+             EvidenceStore.record_evidence(
+               identity,
+               weekly_quota_evidence(observed_at, reset_at, "100", %{},
+                 active_limit: 243,
+                 credits: 0
+               ),
+               observed_at,
+               observed_at
+             )
 
-      assert {:ok, canonical} =
+    at = DateTime.add(observed_at, 60)
+
+    assert {:ok, current} =
+             EvidenceStore.record_evidence(identity, safe_weekly_zero(at, reset_at), at, at)
+
+    for late_at <- [observed_at, at] do
+      assert {:ok, unchanged} =
                EvidenceStore.record_evidence(
                  identity,
-                 weekly_quota_evidence(observed_at, reset_at, "100", %{},
-                   active_limit: 243,
-                   credits: 0
-                 ),
-                 observed_at,
-                 observed_at
+                 weekly_quota_evidence(late_at, reset_at, "100", %{}),
+                 late_at,
+                 at
                )
 
-      candidate_at = DateTime.add(observed_at, 5, :minute)
-      confirmed_at = DateTime.add(candidate_at, 180, :second)
-      {candidate, confirmation} = observations_for.(candidate_at, confirmed_at, reset_at)
+      assert unchanged.id == canonical.id
+      assert unchanged.observed_at == current.observed_at
+      assert Decimal.equal?(unchanged.used_percent, 0)
+    end
 
-      for {evidence, at} <- [{candidate, candidate_at}, {confirmation, confirmed_at}] do
-        assert {:ok, _row} = EvidenceStore.record_evidence(identity, evidence, at, at)
-      end
-
-      persisted = Repo.get!(AccountQuotaWindow, canonical.id)
-      assert Decimal.equal?(persisted.used_percent, Decimal.new("100"))
-      assert persisted.active_limit == 243
-      assert persisted.credits == 0
-      assert_exhausted_routing(identity, persisted, confirmed_at)
-      assert_exhausted_usage_response(recycle(current_conn), setup)
-
-      recycle(current_conn)
-    end)
+    assert %{"rate_limit" => %{"allowed" => true, "secondary_window" => %{"used_percent" => 0}}} =
+             usage_response(conn, setup)
   end
 
   test "usage aliases preserve current meter identity and the legacy wire schema", %{conn: conn} do
@@ -384,7 +369,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  window_kind: "primary",
                  window_minutes: 300,
                  used_percent: Decimal.new("67"),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -397,7 +382,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  limit_name: "Shared feature",
                  metered_feature: "meter_beta",
                  raw_metered_feature: " meter_beta ",
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -410,7 +395,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  limit_name: "Shared feature",
                  metered_feature: "meter_beta",
                  raw_metered_feature: " meter_beta ",
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -423,7 +408,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  limit_name: "Shared feature",
                  metered_feature: "meter_alpha",
                  raw_metered_feature: "meter_alpha",
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -436,7 +421,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  limit_name: "Shared feature",
                  metered_feature: "meter_alpha",
                  raw_metered_feature: "meter_alpha",
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: now
                },
@@ -448,7 +433,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  display_label: "Stale feature",
                  metered_feature: "stale_meter",
                  reset_at: DateTime.add(now, 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh",
                  observed_at: stale_observed_at
                },
@@ -459,7 +444,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  used_percent: Decimal.new("22"),
                  display_label: "Unknown feature",
                  metered_feature: "unknown_meter",
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "unknown",
                  observed_at: now
                }
@@ -591,7 +576,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
       window_minutes: 300,
       used_percent: Decimal.new("100"),
       reset_at: DateTime.add(now, 5, :hour),
-      source: "test",
+      source: "codex_usage_api",
       freshness_state: "fresh",
       observed_at: now
     }
@@ -602,7 +587,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
       window_minutes: 10_080,
       used_percent: Decimal.new("40"),
       reset_at: DateTime.add(now, 7, :day),
-      source: "test",
+      source: "codex_usage_api",
       freshness_state: "fresh",
       observed_at: now
     }
@@ -714,7 +699,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("100"),
                  reset_at: DateTime.add(DateTime.utc_now(), 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh"
                }
              ])
@@ -726,7 +711,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  window_minutes: 300,
                  used_percent: Decimal.new("5"),
                  reset_at: DateTime.add(DateTime.utc_now(), 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh"
                }
              ])
@@ -792,7 +777,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  active_limit: 100,
                  credits: 9,
                  reset_at: DateTime.add(DateTime.utc_now(), 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh"
                }
              ])
@@ -806,7 +791,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                  active_limit: 100,
                  credits: 47,
                  reset_at: DateTime.add(DateTime.utc_now(), 300, :second),
-                 source: "test",
+                 source: "codex_usage_api",
                  freshness_state: "fresh"
                }
              ])
@@ -909,7 +894,7 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
                burn_observed_at
              )
 
-    assert burning_window.active_limit == 601
+    assert burning_window.active_limit == 500
     assert burning_window.credits == 500
 
     burn_conn =
@@ -1297,39 +1282,6 @@ defmodule CodexPoolerWeb.Runtime.CodexUsageControllerTest do
 
   defp safe_status do
     %{"rate_limit_allowed" => true, "rate_limit_reached" => false}
-  end
-
-  defp assert_exhausted_routing(identity, persisted, as_of) do
-    assert %{
-             eligible?: false,
-             routing_state: :blocked,
-             exclusions: [%{code: "quota_weekly_exhausted", reason_codes: ["exhausted"]}],
-             selection: %{
-               secondary: %AccountQuotaWindow{id: persisted_id},
-               blocked_windows: [%AccountQuotaWindow{id: blocked_id}]
-             }
-           } = QuotaWindows.routing_quota_eligibility(identity, at: as_of)
-
-    assert persisted_id == persisted.id
-    assert blocked_id == persisted.id
-
-    {primary, secondary} =
-      identity
-      |> QuotaWindows.list_quota_windows(as_of)
-      |> UsageResponses.account_usage_windows(as_of)
-
-    assert %{allowed: false, limit_reached: true, secondary_window: %{used_percent: 100}} =
-             UsageResponses.codex_rate_limit(primary, secondary)
-  end
-
-  defp assert_exhausted_usage_response(conn, setup) do
-    assert %{
-             "rate_limit" => %{
-               "allowed" => false,
-               "limit_reached" => true,
-               "secondary_window" => %{"used_percent" => 100}
-             }
-           } = usage_response(conn, setup)
   end
 
   defp usage_response(conn, setup) do

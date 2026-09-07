@@ -93,7 +93,7 @@ defmodule CodexPooler.Accounting.UsageResponsesTest do
         ),
       raw_metered_feature: Keyword.get(overrides, :raw_metered_feature),
       raw_limit_id: Keyword.get(overrides, :raw_limit_id),
-      source: "test",
+      source: "codex_usage_api",
       freshness_state: freshness_state,
       observed_at: observed_at
     }
@@ -106,7 +106,7 @@ defmodule CodexPooler.Accounting.UsageResponsesTest do
       window_minutes: 300,
       used_percent: Decimal.new("12"),
       reset_at: DateTime.add(@as_of, 300, :second),
-      source: "test",
+      source: "codex_usage_api",
       freshness_state: "fresh",
       observed_at: observed_at
     }

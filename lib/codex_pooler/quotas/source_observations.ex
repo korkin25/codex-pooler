@@ -25,6 +25,38 @@ defmodule CodexPooler.Quotas.SourceObservations do
     |> Enum.group_by(&key/1)
   end
 
+  @doc "Whether runtime observations need a full authoritative API refresh."
+  def api_refresh_needed?(runtime_windows, raw_windows, as_of) do
+    api_groups =
+      raw_windows
+      |> WindowSelector.logical_windows(as_of)
+      |> groups(as_of)
+
+    runtime_windows
+    |> Enum.reject(&future_observation?(&1, as_of))
+    |> Enum.any?(fn runtime ->
+      case Map.get(api_groups, key(runtime), []) do
+        [] -> true
+        api_windows -> Enum.any?(api_windows, &different_api_report?(runtime, &1))
+      end
+    end)
+  end
+
+  defp different_api_report?(runtime, api) do
+    not same_percent?(runtime.used_percent, api.used_percent) or
+      different_api_reset?(runtime.reset_at, api.reset_at)
+  end
+
+  defp different_api_reset?(%DateTime{} = left, %DateTime{} = right),
+    do: abs(DateTime.diff(left, right, :second)) > @reset_display_tolerance_seconds
+
+  defp different_api_reset?(nil, nil), do: false
+  defp different_api_reset?(_left, _right), do: true
+
+  defp same_percent?(%Decimal{} = left, %Decimal{} = right), do: Decimal.equal?(left, right)
+  defp same_percent?(nil, nil), do: true
+  defp same_percent?(_left, _right), do: false
+
   def disagreement?(windows, as_of, dimension) do
     current =
       Enum.filter(windows, fn window ->

@@ -5474,9 +5474,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
                run_unboxed(fn ->
                  identity = Repo.get!(UpstreamIdentity, evidence.fixture.identity_id)
 
-                 RateLimitObserver.record_headers(identity, %Req.Response{
-                   headers: account_weekly_headers("100")
-                 })
+                 RateLimitObserver.record_provider_rejection(
+                   identity,
+                   account_weekly_headers("100"),
+                   "{}"
+                 )
                end)
 
       converged =
@@ -5510,7 +5512,10 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       assert_receive {:direct_refilter_side_b, identity_id}
       assert identity_id == evidence.fixture.identity_id
 
-      assert {:error, %{code: "quota_exhausted"}} = evidence.result.routing_result
+      assert {:ok, [{_assignment, routed_identity}], _options, _state} =
+               evidence.result.routing_result
+
+      assert routed_identity.id == evidence.fixture.identity_id
 
       persisted = Repo.get!(UpstreamIdentity, evidence.fixture.identity_id)
       refute Map.has_key?(persisted.metadata["saved_reset_redemption"], "probe")
@@ -9469,12 +9474,14 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     handler_id =
       "saved-reset-post-consume-finalizer-#{System.unique_integer([:positive, :monotonic])}"
 
+    window_ids = run_unboxed(fn -> Enum.map(QuotaWindows.list_evidence(identity_id), & &1.id) end)
+
     :ok =
       :telemetry.attach(
         handler_id,
         [:codex_pooler, :repo, :query],
         fn _event, _measurements, metadata, _config ->
-          handle_post_consume_query(metadata, parent, handler_id, identity_id)
+          handle_post_consume_query(metadata, parent, handler_id, {identity_id, window_ids})
         end,
         nil
       )
@@ -9482,12 +9489,15 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     handler_id
   end
 
-  defp handle_post_consume_query(metadata, parent, handler_id, identity_id) do
+  defp handle_post_consume_query(metadata, parent, handler_id, {identity_id, window_ids}) do
     query = metadata[:query] |> to_string() |> String.trim_leading()
 
     track_post_consume_identity_update(metadata, query, handler_id, identity_id)
     notify_post_consume_dispatch_commit(query, parent, handler_id)
-    notify_post_consume_evidence_write(metadata, query, parent, handler_id, identity_id)
+
+    notify_post_consume_evidence_write(metadata, query, parent, handler_id, [
+      identity_id | window_ids
+    ])
   end
 
   defp track_post_consume_identity_update(metadata, query, handler_id, identity_id) do
@@ -9513,10 +9523,10 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     end
   end
 
-  defp notify_post_consume_evidence_write(metadata, query, parent, handler_id, identity_id) do
+  defp notify_post_consume_evidence_write(metadata, query, parent, handler_id, row_references) do
     if metadata[:repo] == Repo and metadata[:source] == "account_quota_windows" and
          (String.starts_with?(query, "INSERT") or String.starts_with?(query, "UPDATE")) and
-         query_metadata_contains?(metadata, identity_id) do
+         Enum.any?(row_references, &query_metadata_contains?(metadata, &1)) do
       send(parent, {handler_id, :evidence_write, self()})
     end
   end
@@ -9644,10 +9654,10 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
 
         assert phase == "consuming"
 
-        assert :ok =
-                 RateLimitObserver.record_headers(identity, %Req.Response{
-                   headers: account_weekly_headers(used_percent)
-                 })
+        assert {:ok, [_]} =
+                 QuotaWindows.upsert_quota_windows(identity, [
+                   weekly_quota_attrs(Decimal.new(used_percent), source: "codex_usage_api")
+                 ])
 
         persisted = Repo.get!(UpstreamIdentity, fixture.identity_id)
         assert persisted.metadata["saved_reset_redemption"]["phase"] == "consuming"

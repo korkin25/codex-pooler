@@ -16,7 +16,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows do
     Quota.WindowSelector
   }
 
-  alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
+  alias CodexPooler.Upstreams.Lifecycle.{CredentialFencing, IdentityLifecycle}
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   alias Ecto.Multi
@@ -115,6 +115,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows do
             broadcast_upstream_change(%{identity: identity}, "upstream_quota_windows_updated")
           end
 
+          Quota.SourceRefresh.after_ingest(identity, quota_windows)
           {:ok, quota_windows}
 
         {:error, _operation, reason, _changes} ->
@@ -304,6 +305,11 @@ defmodule CodexPooler.Upstreams.Quota.Windows do
     # wall clock and can pick a different representative than the timestamp
     # the caller is evaluating.
     windows = list_evidence(identity_or_id)
+
+    identity_id =
+      if is_struct(identity_or_id, UpstreamIdentity), do: identity_or_id.id, else: identity_or_id
+
+    opts = Keyword.put(opts, :credential_epoch, CredentialFencing.credential_epoch(identity_id))
 
     quota_window_selection_data_from_windows(windows, opts)
   end

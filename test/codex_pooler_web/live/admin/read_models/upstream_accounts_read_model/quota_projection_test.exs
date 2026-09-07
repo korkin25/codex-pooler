@@ -14,7 +14,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
   @snapshot_at ~U[2026-07-25 12:00:00Z]
 
   @tag :quota_projection
-  test "keeps a valid post-consume candidate visible when the effective fold selects another source" do
+  test "keeps legacy post-consume diagnostics while the effective fold selects the API" do
     consumed_at = DateTime.add(@snapshot_at, -5, :minute)
 
     candidate_row =
@@ -44,7 +44,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     raw_windows = [candidate_row, selected_row]
     effective_windows = QuotaWindows.effective_quota_windows(raw_windows, @snapshot_at)
 
-    assert [^selected_row] = effective_windows
+    assert [^candidate_row] = effective_windows
 
     assert QuotaProjection.saved_reset_confirmation(
              redemption("consumed_pending_probe", consumed_at),
@@ -431,7 +431,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     end
 
     @tag :stale_additional_visibility
-    test "omits stale non-exhausted additional evidence" do
+    test "retains stale non-exhausted additional API evidence as historical" do
       observed_at = DateTime.add(@snapshot_at, -(Evidence.freshness_ttl_seconds() + 1), :second)
 
       rows =
@@ -441,11 +441,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
           @snapshot_at
         )
 
-      refute Enum.any?(rows, &(&1.key == "model-codex_spark-primary-300"))
+      row = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
+      assert row.evidence_state == :stale
+      assert row.meter_state == :historical
+      assert row.percent_label == "75%"
     end
 
     @tag :stale_additional_visibility
-    test "omits stale exhausted additional evidence" do
+    test "retains stale exhausted additional API evidence as historical exhaustion" do
       observed_at = DateTime.add(@snapshot_at, -(Evidence.freshness_ttl_seconds() + 1), :second)
 
       rows =
@@ -455,11 +458,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
           @snapshot_at
         )
 
-      refute Enum.any?(rows, &(&1.key == "model-codex_spark-primary-300"))
+      row = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
+      assert row.evidence_state == :stale
+      assert row.meter_state == :historical_exhausted
+      assert row.percent_label == "0%"
     end
 
     @tag :stale_additional_visibility
-    test "omits stale markerless additional evidence" do
+    test "retains stale markerless additional API zero as historical" do
       observed_at = DateTime.add(@snapshot_at, -(Evidence.freshness_ttl_seconds() + 1), :second)
 
       rows =
@@ -474,7 +480,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
           @snapshot_at
         )
 
-      refute Enum.any?(rows, &(&1.key == "model-codex_spark-primary-300"))
+      row = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
+      assert row.evidence_state == :stale
+      assert row.meter_state == :historical
+      assert row.percent_label == "100%"
     end
 
     @tag :stale_additional_visibility
@@ -517,8 +526,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
           DateTime.add(observed_at, ttl_seconds + 1, :second)
         )
 
-      assert Enum.any?(before_expiry_rows, &(&1.key == "model-codex_spark-primary-300"))
-      refute Enum.any?(after_expiry_rows, &(&1.key == "model-codex_spark-primary-300"))
+      before = Enum.find(before_expiry_rows, &(&1.key == "model-codex_spark-primary-300"))
+      after_expiry = Enum.find(after_expiry_rows, &(&1.key == "model-codex_spark-primary-300"))
+      assert before.evidence_state == :fresh
+      assert after_expiry.evidence_state == :stale
+      assert before.percent == after_expiry.percent
     end
 
     @tag :quota_projection
@@ -579,16 +591,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     end
 
     @tag :quota_projection
-    test "projects fresh markerless zero-use evidence as current without a reset" do
+    test "projects fresh markerless API zero with its reported reset" do
       row = projected_spark_row(used_percent: "0", metadata: %{})
 
       assert Decimal.equal?(row.percent, Decimal.new("100"))
       assert row.evidence_state == :fresh
       assert row.meter_state == :current
       assert row.freshness_label == "current"
-      assert row.reset_display_state == :absent
-      assert row.reset_at == nil
-      assert row.reset_label == nil
+      assert row.reset_display_state == :countdown
+      assert row.reset_at == DateTime.add(@snapshot_at, 10_080, :minute)
+      assert row.reset_label == "in 7d"
     end
 
     @tag :quota_projection
@@ -596,6 +608,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       row =
         projected_spark_row(
           used_percent: "40",
+          reset_at: nil,
           metadata: %{"reset_state" => "unknown"}
         )
 
@@ -1048,10 +1061,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
   end
 
   @tag :quota_account_projection
-  test "provider-observed zero-use account limits remain visible across runtime sources" do
+  test "zero-use account limits are reported only from the API" do
     observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-    for source <- ~w(codex_rate_limit_event codex_response_headers codex_rate_limit_error) do
+    for source <-
+          ~w(codex_usage_api codex_rate_limit_event codex_response_headers codex_rate_limit_error) do
       primary =
         [
           account_window(
@@ -1069,10 +1083,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
         )
         |> Enum.find(&(&1.key == :primary_5h))
 
-      assert Decimal.equal?(primary.percent, Decimal.new("100")), source
-      assert primary.percent_value == 100, source
-      assert primary.percent_label == "100%", source
-      assert String.starts_with?(primary.reset_label, "in "), source
+      if source == "codex_usage_api" do
+        assert Decimal.equal?(primary.percent, Decimal.new("100"))
+        assert primary.percent_value == 100
+        assert primary.percent_label == "100%"
+        assert String.starts_with?(primary.reset_label, "in ")
+      else
+        assert primary.percent == nil
+        assert primary.percent_label == "not reported"
+        assert primary.reset_at == nil
+      end
     end
   end
 
@@ -1219,17 +1239,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     assert Decimal.equal?(secondary.percent, Decimal.new("100"))
     assert secondary.percent_value == 100
     assert secondary.percent_label == "100%"
-    assert secondary.reset_semantics == :unknown
-    assert secondary.reset_at == nil
-    assert secondary.reset_label == nil
-    assert secondary.reset_title == nil
+    assert secondary.reset_semantics == :anchored
+    assert secondary.reset_at == DateTime.add(observed_at, 10_080, :minute)
+    assert secondary.reset_label == "in 7d"
+    assert String.starts_with?(secondary.reset_title, "resets ")
   end
 
   @tag :quota_spark_projection
-  test "provider-observed zero-use Spark limits remain visible across runtime sources" do
+  test "zero-use Spark limits are reported only from the API" do
     observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-    for source <- ~w(codex_rate_limit_event codex_response_headers codex_rate_limit_error) do
+    for source <-
+          ~w(codex_usage_api codex_rate_limit_event codex_response_headers codex_rate_limit_error) do
       rows =
         [spark_window("primary", 300, observed_at, source: source)]
         |> QuotaProjection.quota_limit_rows(
@@ -1237,16 +1258,22 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
           observed_at
         )
 
-      assert primary = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
-      assert Decimal.equal?(primary.percent, Decimal.new("100")), source
-      assert primary.percent_value == 100, source
-      assert primary.percent_label == "100%", source
-      assert String.starts_with?(primary.reset_label, "in "), source
+      primary = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
+
+      if source == "codex_usage_api" do
+        assert primary
+        assert Decimal.equal?(primary.percent, Decimal.new("100"))
+        assert primary.percent_value == 100
+        assert primary.percent_label == "100%"
+        assert String.starts_with?(primary.reset_label, "in ")
+      else
+        assert primary == nil
+      end
     end
   end
 
   @tag :quota_spark_projection
-  test "floating Spark weekly evidence projects starts-on-use semantics without an absolute reset" do
+  test "API absolute Spark reset overrides obsolete floating metadata" do
     observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     rows =
@@ -1258,10 +1285,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), observed_at)
 
     assert weekly = Enum.find(rows, &(&1.key == "model-codex_spark-secondary-10080"))
-    assert weekly.reset_semantics == :floating
-    assert weekly.reset_at == nil
-    assert weekly.reset_label == "starts on use"
-    assert weekly.reset_title == "provider reports a rolling seven-day window until use starts"
+    assert weekly.reset_semantics == :anchored
+    assert weekly.reset_at == DateTime.add(observed_at, 10_080, :minute)
+    assert weekly.reset_label == "in 7d"
+    assert String.starts_with?(weekly.reset_title, "resets ")
   end
 
   @tag :quota_spark_projection
@@ -1328,7 +1355,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     rows =
-      [spark_window("secondary", 10_080, observed_at, metadata: %{"reset_state" => "unknown"})]
+      [
+        spark_window("secondary", 10_080, observed_at,
+          reset_at: nil,
+          used_percent: Decimal.new("40"),
+          metadata: %{"reset_state" => "unknown"}
+        )
+      ]
       |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), observed_at)
 
     assert weekly = Enum.find(rows, &(&1.key == "model-codex_spark-secondary-10080"))
@@ -1339,7 +1372,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
   end
 
   @tag :quota_spark_projection
-  test "markerless zero-use Spark weekly evidence has no reset countdown" do
+  test "markerless zero-use Spark API evidence keeps the reset countdown" do
     rows =
       [spark_window("secondary", 10_080, @snapshot_at)]
       |> QuotaProjection.quota_limit_rows(
@@ -1348,14 +1381,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       )
 
     assert weekly = Enum.find(rows, &(&1.key == "model-codex_spark-secondary-10080"))
-    assert weekly.reset_semantics == :unknown
-    assert weekly.reset_at == nil
-    assert weekly.reset_label == nil
-    assert weekly.reset_title == nil
+    assert weekly.reset_semantics == :anchored
+    assert weekly.reset_at == DateTime.add(@snapshot_at, 10_080, :minute)
+    assert weekly.reset_label == "in 7d"
+    assert String.starts_with?(weekly.reset_title, "resets ")
   end
 
   @tag :quota_spark_projection
-  test "QF-001 projects the explicit floating winner in both input permutations" do
+  test "QF-001 projects the API absolute reset in both input permutations" do
     explicit_floating =
       spark_window("secondary", 10_080, ~U[2026-07-25 11:59:00Z],
         id: "10000000-0000-4000-8000-000000000001",
@@ -1386,9 +1419,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
         )
 
       assert weekly = Enum.find(rows, &(&1.key == "model-codex_spark-secondary-10080"))
-      assert weekly.reset_semantics == :floating
-      assert weekly.reset_at == nil
-      assert weekly.reset_label == "starts on use"
+      assert weekly.reset_semantics == :anchored
+      assert weekly.reset_at == explicit_floating.reset_at
+      assert weekly.reset_label == "in 7d"
     end
   end
 

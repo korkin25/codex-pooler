@@ -189,8 +189,8 @@ defmodule CodexPooler.Upstreams.SavedResetReconciliationTest do
                candidate_at
              )
 
-    assert Decimal.equal?(pending.used_percent, Decimal.new("100"))
-    assert {:ok, %{observed_at: ^candidate_at}} = EvidenceStore.parse_candidate(pending.metadata)
+    assert Decimal.equal?(pending.used_percent, Decimal.new("0"))
+    assert :none = EvidenceStore.parse_candidate(pending.metadata)
 
     redemption = %{
       "status" => "redeeming",
@@ -312,12 +312,12 @@ defmodule CodexPooler.Upstreams.SavedResetReconciliationTest do
   end
 
   @tag :scheduler_boundary
-  test "scheduled reconciliation keeps an unconfirmed weekly restart candidate pending" do
+  test "scheduled reconciliation accepts API capacity despite legacy weekly restart metadata" do
     assert_pending_candidate_control(:valid)
   end
 
   @tag :scheduler_boundary
-  test "scheduled reconciliation restarts a malformed weekly candidate without converging" do
+  test "scheduled reconciliation accepts API capacity despite malformed legacy candidate metadata" do
     assert_pending_candidate_control(:malformed)
   end
 
@@ -1444,23 +1444,22 @@ defmodule CodexPooler.Upstreams.SavedResetReconciliationTest do
                candidate_at
              )
 
-    pending =
-      if candidate_kind == :malformed do
-        malformed_metadata =
-          put_in(pending.metadata, ["__quota_confirmed_candidate_v1", "count"], 2)
+    # Literal pre-upgrade candidate metadata remains migration input. New API
+    # ingestion no longer manufactures candidates to corroborate its own data.
+    legacy = %{
+      "used_percent" => "0",
+      "reset_at" => DateTime.to_iso8601(candidate_reset),
+      "observed_at" => DateTime.to_iso8601(candidate_at),
+      "version" => 1
+    }
 
-        pending
-        |> Ecto.Changeset.change(%{metadata: malformed_metadata})
-        |> Repo.update!()
-      else
-        pending
-      end
+    legacy = if candidate_kind == :malformed, do: Map.put(legacy, "count", "bad"), else: legacy
 
-    expected_candidate_observed_at =
-      case EvidenceStore.parse_candidate(pending.metadata) do
-        {:ok, candidate} -> candidate.observed_at
-        :none -> nil
-      end
+    pending
+    |> Ecto.Changeset.change(
+      metadata: Map.put(pending.metadata, "__quota_confirmed_candidate_v1", legacy)
+    )
+    |> Repo.update!()
 
     redemption = pending_redemption(consumed_at)
     put_redemption!(identity, redemption)
@@ -1473,15 +1472,13 @@ defmodule CodexPooler.Upstreams.SavedResetReconciliationTest do
       |> QuotaWindows.list_evidence()
       |> Enum.find(&(&1.quota_key == "account" and &1.window_kind == "secondary"))
 
-    assert Decimal.equal?(canonical.used_percent, Decimal.new("100"))
-    assert {:ok, candidate} = EvidenceStore.parse_candidate(canonical.metadata)
+    assert Decimal.equal?(canonical.used_percent, Decimal.new("0"))
+    assert :none = EvidenceStore.parse_candidate(canonical.metadata)
+    persisted_redemption = Repo.reload!(identity).metadata["saved_reset_redemption"]
+    assert persisted_redemption["phase"] == "confirmed_by_quota"
 
-    case {candidate_kind, expected_candidate_observed_at} do
-      {:valid, expected_at} -> assert DateTime.compare(candidate.observed_at, expected_at) == :eq
-      {:malformed, nil} -> assert DateTime.compare(candidate.observed_at, candidate_at) == :gt
-    end
-
-    assert Repo.reload!(identity).metadata["saved_reset_redemption"] == redemption
+    for key <- ["attempt_id", "generation", "consumed_at", "result"],
+        do: assert(persisted_redemption[key] == redemption[key])
 
     requests = FakeUpstream.requests(fake)
     assert requests != []

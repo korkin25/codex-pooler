@@ -311,7 +311,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
     refute_received {:websocket_owner_frame, "stale", 1, {:data, ^encoded}}
 
     refute Enum.any?(
-             QuotaWindows.list_quota_windows(fixture.identity),
+             QuotaWindows.list_evidence(fixture.identity),
              &(&1.source == "codex_rate_limit_event")
            )
 
@@ -1328,7 +1328,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
 
   defp wait_for_rate_limit_event_window(identity, window_kind, attempts) do
     case Enum.find(
-           QuotaWindows.list_quota_windows(identity),
+           QuotaWindows.list_evidence(identity),
            &(&1.source == "codex_rate_limit_event" and &1.window_kind == window_kind)
          ) do
       nil ->
@@ -2108,7 +2108,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
 
   defp quota_observations(identity) do
     identity
-    |> QuotaWindows.list_quota_windows()
+    |> QuotaWindows.list_evidence()
     |> Enum.filter(&(&1.source == "codex_rate_limit_event" and &1.window_kind == "primary"))
   end
 

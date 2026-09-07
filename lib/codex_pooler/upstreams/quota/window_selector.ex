@@ -11,7 +11,6 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelector do
   }
 
   alias CodexPooler.Upstreams.Quota
-  alias CodexPooler.Upstreams.Quota.Windows.CycleConfirmation
 
   @fresh "fresh"
 
@@ -44,6 +43,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelector do
 
   def logical_windows(windows, %DateTime{} = as_of) when is_list(windows) do
     windows
+    |> Enum.filter(&(&1.source == "codex_usage_api"))
     |> Enum.reject(&future_observation?(&1, as_of))
     |> Enum.map(&normalize_legacy_weekly_primary/1)
     |> Enum.group_by(&logical_key/1)
@@ -51,12 +51,45 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelector do
       candidates
       |> additional_window_groups()
       |> Enum.map(fn candidates ->
-        candidates
-        |> reject_prior_cycle_windows(as_of)
-        |> best_logical_window(as_of)
+        best_logical_window(candidates, as_of)
       end)
     end)
     |> Enum.sort_by(&logical_sort_key/1)
+  end
+
+  @doc false
+  def current_provider_rejections(windows, as_of, credential_epoch) do
+    api_windows = logical_windows(windows, as_of)
+
+    Enum.filter(windows, fn window ->
+      current_rejection?(window, as_of, credential_epoch) and
+        not superseded_rejection?(window, api_windows)
+    end)
+  end
+
+  defp current_rejection?(window, as_of, credential_epoch) do
+    window.source == "codex_rate_limit_error" and
+      window.metadata["runtime_provider_rejection"] == true and
+      is_integer(credential_epoch) and credential_epoch > 0 and
+      window.metadata["credential_epoch"] == credential_epoch and
+      current_exhausted_window?(window, as_of)
+  end
+
+  defp current_exhausted_window?(window, as_of) do
+    not future_observation?(window, as_of) and fresh?(window, as_of) and
+      reset_bearing?(window) and not expired?(window, as_of) and exhausted?(window)
+  end
+
+  defp superseded_rejection?(window, api_windows) do
+    Enum.any?(api_windows, fn api ->
+      provider_meter_key(api) == provider_meter_key(window) and
+        timestamp_rank(api.observed_at) > timestamp_rank(window.observed_at)
+    end)
+  end
+
+  defp provider_meter_key(window) do
+    window = normalize_legacy_weekly_primary(window)
+    {logical_key(window), AdditionalMeterIdentity.token(window)}
   end
 
   # Generic observations predate provider meter identity. They remain one
@@ -76,49 +109,9 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelector do
     end
   end
 
-  # Compatibility heuristic for routing selection, not proof of a new cycle:
-  # provider resets can disagree while both are still in the future. Preserve
-  # the existing routing decision here; the operator UI separately projects raw
-  # evidence and exposes these disagreements without claiming either is truth.
-  @prior_cycle_margin_seconds 60 * 60
-
-  defp reject_prior_cycle_windows(candidates, as_of) do
-    confirmed_resets =
-      for window <- candidates,
-          CycleConfirmation.selector_valid?(window, as_of),
-          do: window.reset_at
-
-    fresh_resets =
-      for window <- candidates,
-          fresh?(window, as_of),
-          match?(%DateTime{}, window.reset_at),
-          do: window.reset_at
-
-    case confirmed_resets do
-      [_first | _rest] = resets ->
-        reject_resets_before(candidates, Enum.max(resets, DateTime), true, as_of)
-
-      [] ->
-        reject_stale_prior_cycle_windows(candidates, fresh_resets, as_of)
-    end
-  end
-
-  defp reject_stale_prior_cycle_windows(candidates, fresh_resets, as_of) do
-    case fresh_resets do
-      [] ->
-        candidates
-
-      resets ->
-        reject_resets_before(candidates, Enum.max(resets, DateTime), false, as_of)
-    end
-  end
-
-  defp reject_resets_before(candidates, newest, reject_fresh?, as_of) do
-    Enum.reject(candidates, fn window ->
-      (reject_fresh? or not fresh?(window, as_of)) and match?(%DateTime{}, window.reset_at) and
-        DateTime.diff(newest, window.reset_at, :second) > @prior_cycle_margin_seconds
-    end)
-  end
+  # Usage API is the quota authority. Runtime observations remain persisted
+  # diagnostics; provider errors still use their independent failure/cooldown path.
+  # A newer API snapshot may report less usage or an earlier reset.
 
   # Evidence observed after the evaluation instant did not exist in that form
   # yet: a historical `as_of` must never rank, select, or supersede against
@@ -169,6 +162,8 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelector do
   defp normalize_scope_dimensions(logical_key), do: logical_key
 
   defp best_by_score(windows, as_of, extra_rank \\ fn _window -> 0 end) do
+    windows = logical_windows(windows, as_of)
+
     Enum.max_by(
       windows,
       &selection_score(&1, as_of, extra_rank),
@@ -186,6 +181,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelector do
 
   defp logical_selection_score(%Quota.AccountQuotaWindow{} = window, as_of) do
     {
+      timestamp_rank(window.observed_at),
       fresh_rank(window, as_of),
       measurement_rank(window),
       pressure_rank(window),

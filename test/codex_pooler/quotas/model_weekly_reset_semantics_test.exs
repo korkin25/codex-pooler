@@ -8,6 +8,36 @@ defmodule CodexPooler.Quotas.ModelWeeklyResetSemanticsTest do
   @reset_at ~U[2026-08-01 12:00:00.000000Z]
 
   describe "classify/1" do
+    test "API absolute weekly resets remain anchored at zero without inferred restart metadata" do
+      for scope <- ["model", "upstream_model"],
+          used <- ["0", "-0", "0.00", "17", "100"],
+          metadata <- [%{}, %{"reset_state" => "floating"}, %{"reset_state" => "anchored"}] do
+        assert ModelWeeklyResetSemantics.classify(
+                 weekly_window(%{
+                   source: "codex_usage_api",
+                   quota_scope: scope,
+                   used_percent: Decimal.new(used),
+                   metadata: metadata
+                 })
+               ) == :anchored
+      end
+    end
+
+    test "API source cannot manufacture a reset or validate an invalid percentage" do
+      for overrides <- [
+            %{reset_at: nil},
+            %{reset_at: "2026-08-01T12:00:00Z"},
+            %{used_percent: nil},
+            %{used_percent: Decimal.new("NaN")},
+            %{used_percent: Decimal.new("-1")},
+            %{used_percent: Decimal.new("101")}
+          ] do
+        assert ModelWeeklyResetSemantics.classify(
+                 weekly_window(Map.put(overrides, :source, "codex_usage_api"))
+               ) == :unknown
+      end
+    end
+
     test "given atom and string target-scope maps, when anchored evidence is classified, then both scopes are anchored" do
       assert ModelWeeklyResetSemantics.classify(
                weekly_window(%{metadata: %{"reset_state" => "anchored"}})
@@ -242,7 +272,7 @@ defmodule CodexPooler.Quotas.ModelWeeklyResetSemanticsTest do
       quota_key: "example_model",
       window_kind: "secondary",
       window_minutes: 10_080,
-      source: "codex_usage_api",
+      source: "codex_response_headers",
       source_precision: "observed",
       quota_scope: "model",
       quota_family: "codex_model",

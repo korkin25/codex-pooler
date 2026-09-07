@@ -711,6 +711,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
              ])
   end
 
+  # Routing fixtures represent a successful Usage API refresh. Runtime header
+  # tests override the source explicitly and exercise diagnostics separately.
   def primary_quota_window_attrs(overrides) do
     Map.merge(
       %{
@@ -718,7 +720,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
         window_minutes: 300,
         used_percent: Decimal.new("1"),
         reset_at: DateTime.add(DateTime.utc_now(), 900, :second) |> DateTime.truncate(:second),
-        source: "codex_response_headers",
+        source: "codex_usage_api",
         source_precision: "observed",
         freshness_state: "fresh"
       },
@@ -734,7 +736,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
         window_minutes: 10_080,
         used_percent: Decimal.new("1"),
         reset_at: DateTime.add(DateTime.utc_now(), 7, :day) |> DateTime.truncate(:second),
-        source: "codex_response_headers",
+        source: "codex_usage_api",
         source_precision: "observed",
         quota_scope: "account",
         quota_family: "account",
@@ -821,7 +823,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
         reset_at:
           DateTime.add(DateTime.utc_now(), reset_at_seconds, :second)
           |> DateTime.truncate(:second),
-        source: "codex_response_headers",
+        source: "codex_usage_api",
         source_precision: "observed",
         quota_scope: "model",
         quota_family: "codex_model",

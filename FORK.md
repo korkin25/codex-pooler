@@ -22,9 +22,23 @@ Version series `0.7.1-kk.N` carries the following bounded changes:
 - Account quotas are labelled Account Weekly; additional Spark/Reserve
   meters retain their separate identity. `normal_model_slug` is persisted in
   metadata and displayed without altering routing identity or availability.
-- The scheduler's selection behavior, freshness TTL, account state and writes
-  remain upstream-compatible. This is an evidence-display correction, not a
-  change to account selection policy or a proof of provider quota correctness.
+- From `0.7.1-kk.2`, the existing authorized `/metrics` response also exposes
+  native gauges for every non-deleted enrolled account, including paused,
+  disabled, unassigned and never-success accounts. A bounded read-only database
+  snapshot reports inventory, pool memberships, retained source observations,
+  utilization, resets, freshness, conflicts and collector coverage. Opaque
+  internal identities and closed label vocabularies keep credentials, emails,
+  aliases and raw provider/model descriptors out of exposition. Scrapes never
+  load account secrets, refresh OAuth, poll providers, enqueue work, call models,
+  switch accounts or redeem credits. Missing data remains unknown; inactive
+  accounts' retained observations can become stale. See the native metrics
+  contract in `docs-site/src/content/docs/operators/monitoring.mdx`.
+- The scheduler's default selection behavior, routing telemetry, freshness TTL,
+  account state and writes remain upstream-compatible. Metrics reuse the same
+  selector with routing telemetry disabled only for read-only evaluation. The
+  fork changes evidence display and export, not account selection policy or
+  the provider's actual quota. Source conflicts never become a combined
+  available-capacity total.
 
 The selector still uses its upstream reset-margin heuristic for routing. A UI
 warning does not disable an account. Elapsed observations remain inspectable but
@@ -37,6 +51,9 @@ No database migration, OAuth enrollment, model request or account change is
 needed. A normal scheduled usage refresh populates the additional metadata.
 The underlying provider discrepancy is unresolved; all regression data is
 synthetic. No production account identifiers or credentials are in the tests.
+The metrics patch adds no database migration or refresh owner. Account metrics
+and history depend on the retained provider evidence and monitoring backend;
+collector success alone does not establish fresh quota for every account.
 
 GitHub Actions runs the existing Elixir tests and formatting/compile checks, then builds the
 upstream release Dockerfile with pinned base images and this notice/license in

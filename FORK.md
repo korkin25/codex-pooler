@@ -11,7 +11,8 @@ Version series `0.7.1-kk.N` carries the following bounded changes:
 - The admin quota view projects raw source observations separately from the
   routing selector. Conflicting reports for windows that have not elapsed show
   `sources differ`, both values, source, observed time, reset time and actual
-  freshness. The selected routing value is explicitly identified. No value is
+  freshness. When only reset timestamps differ, keep the agreed percentage
+  and show a separate reset warning. The selected routing value is explicitly identified. No value is
   declared the true remaining allowance based solely on a later future reset.
 - Account quotas are labelled Account Weekly; additional Spark/Reserve
   meters retain their separate identity. `normal_model_slug` is persisted in

@@ -701,8 +701,9 @@ defmodule CodexPoolerWeb.Operations.MetricsControllerTest do
       ref,
       [:codex_pooler, :repo, :query],
       fn _, _, metadata, pid ->
-        if self() == pid and String.contains?(metadata.query, "SET TRANSACTION"),
-          do: send(pid, :account_collection)
+        if (self() == pid or pid in Process.get(:"$callers", [])) and
+             String.contains?(metadata.query, "SET TRANSACTION"),
+           do: send(pid, :account_collection)
       end,
       self()
     )

@@ -27,8 +27,10 @@ defmodule CodexPooler.Metrics.AccountSnapshot do
   FROM (
     SELECT a.upstream_identity_id, a.pool_id, a.status, a.health_status,
            a.eligibility_status, a.last_successful_refresh_at,
-           a.metadata->'last_reconciliation'->>'status' AS reconciliation_status,
-           a.metadata->'last_reconciliation'->>'finished_at' AS reconciliation_finished_at,
+           CASE WHEN jsonb_typeof(a.metadata->'last_reconciliation'->'status') = 'string'
+             THEN a.metadata->'last_reconciliation'->>'status' END AS reconciliation_status,
+           CASE WHEN jsonb_typeof(a.metadata->'last_reconciliation'->'finished_at') = 'string'
+             THEN a.metadata->'last_reconciliation'->>'finished_at' END AS reconciliation_finished_at,
            count(*) OVER (PARTITION BY a.upstream_identity_id) AS row_count,
            row_number() OVER (PARTITION BY a.upstream_identity_id ORDER BY a.pool_id) AS position
     FROM pool_upstream_assignments a
@@ -63,6 +65,28 @@ defmodule CodexPooler.Metrics.AccountSnapshot do
   def load(repo \\ Repo) do
     deadline = System.monotonic_time(:millisecond) + @deadline_ms
 
+    # DBConnection arms its deadline only after checkout succeeds. A single
+    # owned stream task also bounds a completely occupied connection pool.
+    # The stream kills and awaits its worker on timeout or caller termination;
+    # it never leaves a detached collector waiting to query after this return.
+    [repo]
+    |> Task.async_stream(&read_snapshot(&1, deadline),
+      max_concurrency: 1,
+      timeout: remaining(deadline),
+      on_timeout: :kill_task
+    )
+    |> Enum.to_list()
+    |> collection_result()
+  rescue
+    _exception -> {:error, :snapshot_unavailable}
+  catch
+    :exit, _reason -> {:error, :snapshot_unavailable}
+  end
+
+  defp collection_result([{:ok, result}]), do: normalize_result(result)
+  defp collection_result(_result), do: {:error, :snapshot_unavailable}
+
+  defp read_snapshot(repo, deadline) do
     repo.transaction(
       fn ->
         query(repo, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY", deadline)

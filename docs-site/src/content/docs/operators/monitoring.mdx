@@ -291,7 +291,9 @@ Use a lower threshold or shorter interval only during active investigation, beca
 The authorized native `/metrics` response also exposes account gauges. It reads
 all non-deleted identities, including paused, disabled, never-success and
 unassigned accounts, in one `REPEATABLE READ, READ ONLY` transaction with three
-set-based queries and a five-second total deadline. It does not read account
+set-based queries and a five-second total deadline, including connection-pool
+checkout. Timeout or request termination cancels the owned collector task, so
+queued work cannot run after its scrape has ended. It does not read account
 secrets, refresh OAuth, poll providers, enqueue work, call models, switch accounts
 or redeem credits. Inactive accounts' retained observations can become stale.
 Allow the scrape timeout to exceed the account read deadline plus normal response

@@ -18,7 +18,8 @@ defmodule CodexPooler.Metrics.AccountSnapshotTest do
 
     def query!(sql, params, opts) do
       result = CodexPooler.Repo.query!(sql, params, opts)
-      if observer = Process.get(:account_snapshot_observer), do: observer.(sql)
+      [{:observer, observer}] = :ets.lookup(__MODULE__, :observer)
+      observer.(sql)
       result
     end
   end
@@ -186,7 +187,9 @@ defmodule CodexPooler.Metrics.AccountSnapshotTest do
     with_identity(fn identity ->
       quota = insert_window(identity)
 
-      Process.put(:account_snapshot_observer, fn sql ->
+      table = :ets.new(ObservingRepo, [:named_table, :public])
+
+      observer = fn sql ->
         if String.contains?(sql, "SELECT id::text") and
              is_nil(Process.get(:account_snapshot_changed)) do
           Process.put(:account_snapshot_changed, true)
@@ -207,7 +210,9 @@ defmodule CodexPooler.Metrics.AccountSnapshotTest do
           end)
           |> Task.await()
         end
-      end)
+      end
+
+      :ets.insert(table, {:observer, observer})
 
       try do
         assert {:ok, snapshot} = AccountSnapshot.load(ObservingRepo)
@@ -224,8 +229,7 @@ defmodule CodexPooler.Metrics.AccountSnapshotTest do
 
         assert Decimal.equal?(Enum.find(next.windows, &(&1.id == quota.id)).used_percent, 80)
       after
-        Process.delete(:account_snapshot_observer)
-        Process.delete(:account_snapshot_changed)
+        :ets.delete(table)
       end
     end)
   end
@@ -287,6 +291,68 @@ defmodule CodexPooler.Metrics.AccountSnapshotTest do
       :stop ->
         :ok
     end
+  end
+
+  test "reconciliation SQL projects strings only and never serializes nested JSON payloads" do
+    with_identity(fn identity ->
+      pool_id = Ecto.UUID.generate()
+
+      Repo.query!(
+        "INSERT INTO pools(id,slug,name) VALUES ($1::text::uuid,$2,'synthetic')",
+        [pool_id, "metrics-scalar-#{pool_id}"]
+      )
+
+      Repo.query!(
+        """
+        INSERT INTO pool_upstream_assignments(pool_id,upstream_identity_id,assignment_label,status,health_status,eligibility_status)
+        VALUES ($1::text::uuid,$2::text::uuid,'synthetic','paused','unknown','eligible')
+        """,
+        [pool_id, identity.id]
+      )
+
+      try do
+        for field <- ["status", "finished_at"],
+            invalid <- [
+              %{"message" => "nested-private-sentinel@example.test"},
+              ["nested-private-sentinel@example.test"],
+              true,
+              42,
+              nil
+            ] do
+          reconciliation =
+            Map.put(
+              %{"status" => "failed", "finished_at" => "2026-09-07T00:00:00Z"},
+              field,
+              invalid
+            )
+
+          Repo.query!(
+            "UPDATE pool_upstream_assignments SET metadata=$1 WHERE upstream_identity_id::text=$2",
+            [%{"last_reconciliation" => reconciliation}, identity.id]
+          )
+
+          assert {:ok, snapshot} = AccountSnapshot.load()
+          row = Enum.find(snapshot.memberships, &(&1.upstream_identity_id == identity.id))
+
+          column =
+            if field == "status", do: :reconciliation_status, else: :reconciliation_finished_at
+
+          assert Map.fetch!(row, column) == nil
+          assert row.reconciliation_status == reconciliation["status"] or field == "status"
+
+          assert row.reconciliation_finished_at == reconciliation["finished_at"] or
+                   field == "finished_at"
+
+          refute inspect(snapshot) =~ "nested-private-sentinel"
+        end
+      after
+        Repo.delete_all(
+          from a in PoolUpstreamAssignment, where: a.upstream_identity_id == ^identity.id
+        )
+
+        Repo.query!("DELETE FROM pools WHERE id::text=$1", [pool_id])
+      end
+    end)
   end
 
   defp with_identity(fun) do
@@ -368,7 +434,8 @@ defmodule CodexPooler.Metrics.AccountSnapshotTest do
       ref,
       [:codex_pooler, :repo, :query],
       fn _, _, metadata, pid ->
-        if self() == pid, do: send(pid, {:query, metadata.query})
+        if self() == pid or pid in Process.get(:"$callers", []),
+          do: send(pid, {:query, metadata.query})
       end,
       self()
     )

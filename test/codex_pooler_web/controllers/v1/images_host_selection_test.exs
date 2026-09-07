@@ -101,25 +101,24 @@ defmodule CodexPoolerWeb.V1.ImagesHostSelectionTest do
 
   defp assert_image_host(conn, setup, upstream, expected) do
     setup.api_key
-    |> Ecto.Changeset.change(allowed_model_identifiers: ["gpt-image-2"])
+    |> Ecto.Changeset.change(allowed_model_identifiers: ["gpt-image-1"])
     |> Repo.update!()
 
     result =
       conn
       |> auth(setup)
       |> post("/v1/images/generations", %{
-        "model" => "gpt-image-2",
-        "prompt" => "synthetic image",
-        "input_fidelity" => "high"
+        "model" => "gpt-image-1",
+        "prompt" => "synthetic image"
       })
 
     assert %{"data" => [%{"b64_json" => "c3ludGhldGlj"}]} = json_response(result, 200)
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.json["model"] == expected.upstream_model_id
-    assert [%{"model" => "gpt-image-2", "type" => "image_generation"}] = captured.json["tools"]
+    assert [%{"model" => "gpt-image-1", "type" => "image_generation"}] = captured.json["tools"]
     assert [request] = Repo.all(Request)
     assert request.model_id == expected.id
-    assert request.request_metadata["effective_model"] == "gpt-image-2"
+    assert request.request_metadata["effective_model"] == "gpt-image-1"
     assert [attempt] = Repo.all(Attempt)
     assert attempt.upstream_model_id == expected.upstream_model_id
   end
@@ -134,6 +133,6 @@ defmodule CodexPoolerWeb.V1.ImagesHostSelectionTest do
       }
     }
 
-    {:sse, ["event: response.completed\ndata: #{Jason.encode!(payload)}\n\n"]}
+    {:sse, ["event: response.completed\ndata: #{CodexPooler.JSON.encode!(payload)}\n\n"]}
   end
 end

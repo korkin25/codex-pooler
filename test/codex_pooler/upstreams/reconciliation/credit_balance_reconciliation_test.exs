@@ -158,8 +158,18 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
         ] do
       refute has_element?(view, "#{selector} [data-role='quota-source-disagreement']")
       refute has_element?(view, "#{selector} [data-role='quota-reset-disagreement']")
-      assert has_element?(view, "#{selector} [data-source='codex_usage_api']")
-      assert has_element?(view, "#{selector} [data-source='codex_rate_limit_event']")
+
+      assert has_element?(
+               view,
+               "#{selector}-observations-dialog [data-selected='true']",
+               "Usage API"
+             )
+
+      assert has_element?(
+               view,
+               "#{selector}-observations-dialog [data-selected='false']",
+               "Rate-limit event"
+             )
     end
 
     for malformed <- [nil, "invalid", %{"version" => 99}] do

@@ -86,5 +86,23 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounter.RanksTest do
       assert {:ok, ranks} = Ranks.load(encoding)
       assert map_size(ranks) > 0
     end
+
+    assert Ranks.load(:unsupported) == {:error, :unsupported_encoding}
+    encoding = hd(encodings)
+    key = {Ranks, :ranks, encoding}
+    path = Path.join(temporary_ranks_dir, "#{encoding}.tiktoken")
+
+    for invalid <- ["invalid", "%%% 0", "YQ== invalid"] do
+      :persistent_term.erase(key)
+      File.write!(path, invalid)
+      assert Ranks.load(encoding) == {:error, :invalid_rank_file}
+    end
+
+    :persistent_term.erase(key)
+    File.rm!(path)
+    assert Ranks.load(encoding) == {:error, :rank_file_unavailable}
+
+    true = :code.del_path(:codex_pooler)
+    assert Ranks.load(encoding) == {:error, :rank_file_unavailable}
   end
 end

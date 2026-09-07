@@ -55,6 +55,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Audio do
     with {:ok, payload} <- Validation.normalize_payload(payload),
          :ok <- Validation.reject_high_impact_fields(payload),
          :ok <- reject_unsupported_fields(payload),
+         :ok <- validate_response_format(payload),
+         {:ok, payload} <- normalize_prompt(payload),
          {:ok, payload} <- canonicalize_model(payload),
          {:ok, payload} <- normalize_decoded_lists(payload),
          {:ok, file} <- file_metadata(payload) do
@@ -64,6 +66,35 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Audio do
 
   defp reject_unsupported_fields(payload) do
     Validation.reject_unsupported_fields(payload, :audio)
+  end
+
+  defp validate_response_format(payload) do
+    case Map.fetch(payload, "response_format") do
+      :error ->
+        :ok
+
+      {:ok, "json"} ->
+        :ok
+
+      {:ok, _value} ->
+        {:error, Error.invalid_request("response_format must be json", "response_format")}
+    end
+  end
+
+  defp normalize_prompt(payload) do
+    case Map.fetch(payload, "prompt") do
+      :error ->
+        {:ok, payload}
+
+      {:ok, nil} ->
+        {:ok, Map.delete(payload, "prompt")}
+
+      {:ok, prompt} when is_binary(prompt) ->
+        {:ok, payload}
+
+      {:ok, _value} ->
+        {:error, Error.invalid_request("prompt must be a string or null", "prompt")}
+    end
   end
 
   defp canonicalize_model(%{"model" => model} = payload) when model in @supported_models,

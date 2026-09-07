@@ -6,9 +6,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers.RateLimitEvents do
   alias CodexPooler.Quotas.Evidence.Descriptors
 
   @spec parse(term(), DateTime.t()) :: [Evidence.t()]
-  def parse(%{"type" => "codex.rate_limits"} = event, observed_at) do
-    limits = event["rate_limits"] || %{}
-
+  def parse(%{"type" => "codex.rate_limits", "rate_limits" => %{} = limits} = event, observed_at) do
     limit_id = rate_limit_event_limit_id(event)
     limit_name = rate_limit_event_limit_name(event, limit_id)
 

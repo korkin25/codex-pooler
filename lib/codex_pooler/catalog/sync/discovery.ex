@@ -22,8 +22,7 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
       Enum.map(assignments, fn source ->
         case fetcher.(source) do
           {:ok, models} when is_list(models) ->
-            source_models = Enum.map(models, &Map.put(normalize_model_attrs(&1), :source, source))
-            {:ok, source, source_models}
+            normalize_source_models(source, models)
 
           {:error, reason} ->
             {:error, source, reason}
@@ -50,6 +49,19 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
 
   defp all_failed_result([]), do: {:ok, [], [], []}
   defp all_failed_result([{_source, reason} | _rest]), do: {:error, reason}
+
+  defp normalize_source_models(source, models) do
+    if Enum.all?(models, &is_map/1) do
+      source_models = Enum.map(models, &Map.put(normalize_model_attrs(&1), :source, source))
+      {:ok, source, source_models}
+    else
+      {:error, source,
+       catalog_error(
+         :invalid_upstream_model_catalog,
+         "upstream model catalog contains invalid entries"
+       )}
+    end
+  end
 
   @spec fetch_models_for_assignment(map()) :: {:ok, [map()]} | {:error, catalog_error() | term()}
   def fetch_models_for_assignment(%{assignment: assignment, identity: identity}) do

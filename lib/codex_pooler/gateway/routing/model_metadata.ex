@@ -662,6 +662,7 @@ defmodule CodexPooler.Gateway.Routing.ModelMetadata do
 
   defp normalize_modalities(values) do
     values
+    |> Enum.filter(&(is_binary(&1) or (is_atom(&1) and &1 not in [nil, true, false])))
     |> Enum.map(fn value -> value |> to_string() |> String.trim() end)
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()

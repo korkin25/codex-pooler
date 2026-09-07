@@ -43,6 +43,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   @type reset_display_state :: :countdown | :static | :unconfirmed | :absent
 
   @type quota_limit_row :: %{
+          optional(:observation_group) => String.t(),
+          optional(:observations) => [QuotaObservations.observation()],
           required(:key) => atom() | String.t(),
           required(:label) => String.t(),
           required(:percent) => Decimal.t() | nil,
@@ -215,11 +217,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     |> Enum.map(&put_account_credit_balance(&1, windows, snapshot_at, credit_balance))
   end
 
-  @doc "Attaches optional raw diagnostics to the authoritative Usage API selection."
-  def quota_limit_rows(windows, datetime_preferences, snapshot_at, credit_balance, raw_windows) do
+  @spec quota_limit_rows(
+          [Quota.AccountQuotaWindow.t()],
+          DateTimeDisplay.preferences(),
+          DateTime.t(),
+          CodexPooler.Upstreams.Quota.CreditBalanceStore.snapshot() | nil,
+          [Quota.AccountQuotaWindow.t()]
+        ) :: [quota_limit_row()]
+  def quota_limit_rows(windows, preferences, snapshot_at, credit_balance, raw_windows) do
     windows
-    |> quota_limit_rows(datetime_preferences, snapshot_at, credit_balance)
-    |> QuotaObservations.attach(raw_windows, snapshot_at)
+    |> quota_limit_rows(preferences, snapshot_at, credit_balance)
+    |> QuotaObservations.attach(raw_windows, preferences, snapshot_at)
   end
 
   defp put_account_credit_balance(%{key: key} = row, windows, snapshot_at, credit_balance)
@@ -516,8 +524,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       key: key,
       evidence_key: QuotaObservations.key(window),
       selected_source: window.source,
-      label: label,
+      label: if(key == :weekly, do: "Account #{label}", else: label),
       percent: remaining_percent,
+      observation_group: QuotaObservations.group_key(window),
+      observations: [QuotaObservations.project(window, datetime_preferences, snapshot_at)],
       percent_value: quota_percent_value(remaining_percent),
       percent_label: quota_percent_label(remaining_percent),
       count_label: count_label,
@@ -540,7 +550,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   defp quota_limit_row(key, label, nil, _datetime_preferences, _snapshot_at) do
     %{
       key: key,
-      label: label,
+      label: if(key == :weekly, do: "Account #{label}", else: label),
       percent: nil,
       percent_value: 0,
       percent_label: "not reported",
@@ -708,8 +718,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
           anchored_reset_presentation(window.reset_at, datetime_preferences, snapshot_at)
 
         :floating ->
-          {:floating, nil, "starts on use",
-           "provider reports a rolling seven-day window until use starts"}
+          {:floating, nil, "starts on use", floating_reset_title(window)}
 
         :unknown ->
           {:unknown, nil, nil, nil}
@@ -748,15 +757,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
        do: {:unknown, :absent, nil, nil, nil}
 
   defp legacy_quota_reset_presentation(
-         %Quota.AccountQuotaWindow{metadata: metadata, reset_at: reset_at},
+         %Quota.AccountQuotaWindow{metadata: metadata, reset_at: reset_at} = window,
          datetime_preferences,
          snapshot_at
        )
        when is_map(metadata) do
     case Map.fetch(metadata, "reset_state") do
       {:ok, "floating"} ->
-        {:floating, reset_at, "starts on use",
-         "provider reports a rolling seven-day window until use starts"}
+        {:floating, reset_at, "starts on use", floating_reset_title(window)}
 
       {:ok, "anchored"} ->
         anchored_reset_presentation(reset_at, datetime_preferences, snapshot_at)
@@ -776,6 +784,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
        ) do
     anchored_reset_presentation(reset_at, datetime_preferences, snapshot_at)
   end
+
+  defp floating_reset_title(%{window_minutes: 10_080}),
+    do: "provider reports a rolling seven-day window until use starts"
+
+  defp floating_reset_title(_window),
+    do: "provider reports a rolling window until use starts"
 
   defp anchored_reset_presentation(
          %DateTime{} = reset_at,

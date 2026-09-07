@@ -1,7 +1,7 @@
 defmodule CodexPooler.MixTasks.ReliabilityQaLifecycleTest do
   use CodexPooler.UnixIntegrationCase,
     async: false,
-    tools: ~w(git stat shasum readlink perl docker),
+    tools: ~w(git stat shasum readlink perl docker rg),
     docker_compose: true
 
   @wrapper Path.expand("../../../dev_support/bin/reliability-qa-lifecycle", __DIR__)
@@ -193,7 +193,7 @@ defmodule CodexPooler.MixTasks.ReliabilityQaLifecycleTest do
     assert code == 0, output
 
     assert [%{"host_ip" => "127.0.0.1", "published" => "45488", "target" => 5432}] =
-             Jason.decode!(output)["services"]["db"]["ports"]
+             CodexPooler.JSON.decode!(output)["services"]["db"]["ports"]
   end
 
   defp temp_dir!(label) do

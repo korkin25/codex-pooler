@@ -148,6 +148,7 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
 
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.path == "/backend-api/transcribe"
+    assert captured.body =~ audio_bytes
     assert captured.body =~ prompt
     refute captured.body =~ setup.model.upstream_model_id
     refute captured.body =~ Gateway.backend_transcription_model()
@@ -207,6 +208,65 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
     assert request.request_metadata["effective_model"] == Gateway.backend_transcription_model()
     assert request.request_metadata["upload_bytes"] == byte_size(audio_bytes)
     refute inspect(request.request_metadata) =~ audio_bytes
+  end
+
+  for {field, value} <- [
+        {"language", "en"},
+        {"language", nil},
+        {"temperature", 0},
+        {"temperature", nil},
+        {"response_format", "text"},
+        {"response_format", "srt"},
+        {"response_format", "verbose_json"},
+        {"response_format", "vtt"},
+        {"response_format", nil},
+        {"response_format", %{}},
+        {"prompt", %{"unexpected" => "shape"}},
+        {"prompt", 42},
+        {"prompt", []}
+      ] do
+    @field field
+    @value value
+    test "transcription rejects unsupported #{@field}=#{inspect(value)} before effects", %{
+      conn: conn
+    } do
+      upstream = start_upstream(FakeUpstream.json_response(%{"text" => ""}))
+      setup = upstream |> gateway_setup() |> use_transcription_model!()
+
+      response =
+        conn
+        |> auth(setup)
+        |> post("/v1/audio/transcriptions", %{
+          "model" => "gpt-transcribe",
+          "file" => upload_fixture("audio.wav", "audio/wav", "synthetic bytes"),
+          @field => @value
+        })
+
+      assert %{"error" => %{"param" => field}} = json_response(response, 400)
+      assert field == @field
+      assert FakeUpstream.count(upstream) == 0
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+      assert Repo.aggregate(LedgerEntry, :count) == 0
+    end
+  end
+
+  test "transcription treats a null prompt as absent", %{conn: conn} do
+    upstream = start_upstream(FakeUpstream.json_response(%{"text" => ""}))
+    setup = upstream |> gateway_setup() |> use_transcription_model!()
+
+    response =
+      conn
+      |> auth(setup)
+      |> post("/v1/audio/transcriptions", %{
+        "model" => "gpt-transcribe",
+        "file" => upload_fixture("audio.wav", "audio/wav", "synthetic bytes"),
+        "prompt" => nil
+      })
+
+    assert %{"text" => ""} = json_response(response, 200)
+    assert [captured] = FakeUpstream.requests(upstream)
+    assert multipart_parts(captured) == [{:file, "file", "audio.wav"}]
   end
 
   test "POST /v1/audio/transcriptions rejects invalid model before dispatch", %{conn: conn} do

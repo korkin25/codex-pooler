@@ -138,6 +138,12 @@ defmodule CodexPooler.TestRuntimeDatabaseConfigTest do
   end
 
   defp with_env(values, fun) when is_map(values) do
+    values =
+      Map.merge(
+        %{"CODEX_POOLER_TEST_POSTGRES_DB" => nil, "POSTGRES_TEST_DB" => nil},
+        values
+      )
+
     previous = Map.new(values, fn {key, _value} -> {key, System.get_env(key)} end)
 
     Enum.each(values, fn

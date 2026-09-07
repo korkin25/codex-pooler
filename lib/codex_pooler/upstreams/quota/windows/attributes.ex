@@ -111,4 +111,6 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Attributes do
       _invalid -> nil
     end
   end
+
+  defp decimal_or_nil(_value), do: nil
 end

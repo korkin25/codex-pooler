@@ -594,23 +594,35 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
          %{"type" => "image_generation", "model" => model, "size" => size, "quality" => quality} =
            tool
        )
-       when is_binary(model) and is_binary(size) and is_binary(quality),
-       do:
-         validate_exact_builtin_tool(tool, [
-           "type",
-           "model",
-           "size",
-           "quality",
-           "background",
-           "input_fidelity",
-           "output_format"
-         ])
+       when is_binary(model) and is_binary(size) and is_binary(quality) do
+    with :ok <- validate_image_mask(tool) do
+      validate_exact_builtin_tool(tool, [
+        "type",
+        "model",
+        "size",
+        "quality",
+        "background",
+        "input_fidelity",
+        "input_image_mask",
+        "output_format"
+      ])
+    end
+  end
 
   defp validate_tool(%{"type" => "image_generation"} = tool),
     do: validate_exact_builtin_tool(tool, ["type"])
 
   defp validate_tool(_tool),
     do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+
+  defp validate_image_mask(%{"input_image_mask" => %{"image_url" => url} = mask})
+       when is_binary(url) and byte_size(url) > 0 and map_size(mask) == 1,
+       do: :ok
+
+  defp validate_image_mask(%{"input_image_mask" => _}),
+    do: {:error, Error.invalid_request("image mask requires an image_url", "tools")}
+
+  defp validate_image_mask(_), do: :ok
 
   defp validate_namespace_tools(tools) when is_list(tools) and tools != [] do
     Enum.reduce_while(tools, :ok, fn tool, _acc ->

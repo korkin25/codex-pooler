@@ -34,8 +34,18 @@ defmodule CodexPooler.Upstreams.Quota.AuthoritativeUsageTest do
       refute html =~ "sources differ"
       refute html =~ "Reset reports differ"
       refute html =~ "<details open"
-      assert html =~ "98% used / 2% remaining"
-      assert html =~ "Source diagnostics"
+      document = LazyHTML.from_fragment(html)
+
+      refute LazyHTML.query(
+               document,
+               "[data-selected='false'] progress[aria-label='Response headers: 2% remaining, stale, not selected']"
+             )
+             |> Enum.empty?()
+
+      refute LazyHTML.query(document, "[data-selected='true'] progress[value='100.0']")
+             |> Enum.empty?()
+
+      assert html =~ "Quota evidence"
     end
   end
 

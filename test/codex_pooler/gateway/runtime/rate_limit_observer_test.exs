@@ -24,12 +24,18 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
       identity = pending_reset_identity()
 
       context =
-        struct(SelectedCandidateContext, identity: identity)
+        struct(SelectedCandidateContext,
+          identity: identity,
+          model: %{upstream_model_id: "gpt-5.6"}
+        )
 
       headers = rejection_headers()
 
       body =
-        Jason.encode!(%{"type" => "response.completed", "response" => %{"status" => "completed"}})
+        CodexPooler.JSON.encode!(%{
+          "type" => "response.completed",
+          "response" => %{"status" => "completed"}
+        })
 
       case transport do
         :http ->
@@ -60,12 +66,15 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
       identity = pending_reset_identity()
 
       context =
-        struct(SelectedCandidateContext, identity: identity)
+        struct(SelectedCandidateContext,
+          identity: identity,
+          model: %{upstream_model_id: "gpt-5.6"}
+        )
 
       headers = rejection_headers()
 
       body =
-        Jason.encode!(%{
+        CodexPooler.JSON.encode!(%{
           "type" => "response.failed",
           "response" => %{"status" => "failed", "error" => %{"code" => "usage_limit_exceeded"}}
         })
@@ -75,7 +84,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
           SideEffects.observe_http_response(
             context,
             %Req.Response{status: 429, headers: headers},
-            Jason.encode!(%{"error" => %{"code" => "rate_limit_exceeded"}})
+            CodexPooler.JSON.encode!(%{"error" => %{"code" => "rate_limit_exceeded"}})
           )
 
         :sse ->
@@ -102,6 +111,51 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
              )
 
       assert_api_confirmation(identity)
+    end
+  end
+
+  test "failed Spark response headers keep their dispatched model scope" do
+    for transport <- [:http, :websocket] do
+      identity = pending_reset_identity()
+
+      context =
+        struct(SelectedCandidateContext,
+          identity: identity,
+          model: %{upstream_model_id: "gpt-5.3-codex-spark"}
+        )
+
+      headers = rejection_headers()
+      body = CodexPooler.JSON.encode!(%{"error" => %{"code" => "usage_limit_exceeded"}})
+
+      case transport do
+        :http ->
+          SideEffects.observe_http_response(
+            context,
+            %Req.Response{status: 429, headers: headers},
+            body
+          )
+
+        :websocket ->
+          SideEffects.observe_websocket_response(
+            context,
+            %{status: 429, headers: Map.to_list(headers), body: body}
+          )
+      end
+
+      rejected =
+        Enum.filter(
+          QuotaWindows.list_evidence(identity),
+          &(&1.metadata["runtime_provider_rejection"] == true)
+        )
+
+      assert rejected != []
+
+      assert Enum.all?(
+               rejected,
+               &(&1.quota_scope == "model" and &1.model == "gpt-5.3-codex-spark")
+             )
+
+      assert redemption_phase(identity) == "consumed_pending_probe"
     end
   end
 
@@ -252,7 +306,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                RateLimitObserver.record_complete_events(
                  identity,
                  "event: codex.rate_limits\n" <>
-                   "data: #{Jason.encode!(codex_rate_limits_payload(42, reset_at))}\n\n"
+                   "data: #{CodexPooler.JSON.encode!(codex_rate_limits_payload(42, reset_at))}\n\n"
                )
 
       assert window = wait_for_rate_limit_event_window(identity, "primary")
@@ -276,7 +330,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                RateLimitObserver.record_complete_events(
                  identity,
                  "event: codex.rate_limits\n" <>
-                   "data: #{Jason.encode!(codex_rate_limits_payload(42, reset_at))}\n\n"
+                   "data: #{CodexPooler.JSON.encode!(codex_rate_limits_payload(42, reset_at))}\n\n"
                )
 
       assert window = wait_for_rate_limit_event_window(identity, "primary")
@@ -295,7 +349,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                RateLimitObserver.record_complete_events(
                  identity,
                  "event: response.failed\n" <>
-                   "data: #{Jason.encode!(usage_limit_terminal_payload())}\n\n"
+                   "data: #{CodexPooler.JSON.encode!(usage_limit_terminal_payload())}\n\n"
                )
 
       wait_for_rate_limit_event_tasks()
@@ -313,7 +367,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
           assert :ok =
                    RateLimitObserver.record_complete_events(
                      identity,
-                     Jason.encode!(%{
+                     CodexPooler.JSON.encode!(%{
                        "type" => "response.output_text.delta",
                        "delta" => "sample"
                      })
@@ -369,7 +423,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
                RateLimitObserver.record_events(
                  identity,
                  "event: response.output_text.delta\n" <>
-                   "data: #{Jason.encode!(%{"type" => "response.output_text.delta"})}\n\n" <>
+                   "data: #{CodexPooler.JSON.encode!(%{"type" => "response.output_text.delta"})}\n\n" <>
                    "event: codex.rate_limits\n",
                  RateLimitObserver.event_state()
                )
@@ -381,7 +435,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
       event =
         "event: codex.rate_limits\n" <>
-          "data: #{Jason.encode!(codex_rate_limits_payload(42, reset_at))}\n\n"
+          "data: #{CodexPooler.JSON.encode!(codex_rate_limits_payload(42, reset_at))}\n\n"
 
       {marker_offset, marker_size} = :binary.match(event, "codex.rate_limits")
 
@@ -405,7 +459,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
       event =
         "event: codex.rate_limits\r\n" <>
-          "data: #{Jason.encode!(codex_rate_limits_payload(43, reset_at))}\r\n\r\n"
+          "data: #{CodexPooler.JSON.encode!(codex_rate_limits_payload(43, reset_at))}\r\n\r\n"
 
       {split_at, _length} = :binary.match(event, "\r\n")
       split_at = split_at + 1
@@ -426,7 +480,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
       event =
         "event: codex.rate_limits\r" <>
-          "data: #{Jason.encode!(codex_rate_limits_payload(44, reset_at))}\r\r"
+          "data: #{CodexPooler.JSON.encode!(codex_rate_limits_payload(44, reset_at))}\r\r"
 
       assert {:ok, state} =
                RateLimitObserver.record_events(identity, event, RateLimitObserver.event_state())
@@ -582,7 +636,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
          fn identity ->
            RateLimitObserver.record_error(
              identity,
-             Jason.encode!(usable_account_rate_limit_error())
+             CodexPooler.JSON.encode!(usable_account_rate_limit_error())
            )
          end},
         {"runtime_event",
@@ -779,7 +833,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
       assert :ok =
                RateLimitObserver.record_error(
                  stale_identity,
-                 Jason.encode!(exhausted_account_rate_limit_error())
+                 CodexPooler.JSON.encode!(exhausted_account_rate_limit_error())
                )
 
       assert redemption_phase(stale_identity) == "reblocked"
@@ -800,7 +854,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
 
           RateLimitObserver.record_error(
             stale_identity,
-            Jason.encode!(%{
+            CodexPooler.JSON.encode!(%{
               "limit_id" => "codex_future_family",
               "window_kind" => "secondary",
               "window_minutes" => "10080",
@@ -847,7 +901,7 @@ defmodule CodexPooler.Gateway.Runtime.RateLimitObserverTest do
           assert :ok =
                    RateLimitObserver.record_error(
                      identity,
-                     Jason.encode!(%{
+                     CodexPooler.JSON.encode!(%{
                        "limit_id" => "codex_future_family",
                        "window_kind" => "secondary",
                        "window_minutes" => "10080",

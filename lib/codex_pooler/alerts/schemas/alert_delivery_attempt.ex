@@ -70,8 +70,7 @@ defmodule CodexPooler.Alerts.Schemas.AlertDeliveryAttempt do
     ])
     |> validate_inclusion(:status, @statuses)
     |> validate_number(:attempt_number,
-      greater_than_or_equal_to: 1,
-      less_than_or_equal_to: @fixed_max_attempts
+      greater_than_or_equal_to: 1
     )
     |> validate_number(:max_attempts, equal_to: @fixed_max_attempts)
     |> check_constraint(:status, name: :alert_delivery_attempts_status_check)

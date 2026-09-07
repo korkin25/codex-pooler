@@ -53,9 +53,9 @@ defmodule CodexPooler.Catalog.Model do
       :last_sync_run_id,
       :metadata
     ])
-    |> update_change(:upstream_model_id, &String.trim/1)
-    |> update_change(:exposed_model_id, &String.trim/1)
-    |> update_change(:display_name, &String.trim/1)
+    |> update_change(:upstream_model_id, &trim_text/1)
+    |> update_change(:exposed_model_id, &trim_text/1)
+    |> update_change(:display_name, &trim_text/1)
     |> validate_required([
       :pool_id,
       :upstream_model_id,
@@ -75,4 +75,7 @@ defmodule CodexPooler.Catalog.Model do
     |> validate_number(:source_assignment_count, greater_than_or_equal_to: 0)
     |> unique_constraint(:exposed_model_id, name: :models_pool_exposed_uq)
   end
+
+  defp trim_text(nil), do: nil
+  defp trim_text(value), do: String.trim(value)
 end

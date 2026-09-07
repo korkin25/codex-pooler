@@ -314,6 +314,62 @@ defmodule CodexPooler.Gateway.RequestCompression.EligibilityTest do
     end
   end
 
+  test "malformed dispatch metadata fails closed while string keys and translated origins work" do
+    alias CodexPooler.Gateway.RequestCompression.Eligibility
+    {context, options} = request_context(response_body())
+    assert {:skip, :payload_kind_ineligible, _} = Eligibility.check(nil, context, options)
+    assert {:skip, :pool_disabled, _} = Eligibility.check("{}", nil, options)
+
+    for transport <- [nil, "unsupported"] do
+      changed = %{options | transport: %{options.transport | transport: transport}}
+      assert {:skip, :transport_ineligible, _} = Eligibility.check("{}", context, changed)
+    end
+
+    assert {:skip, :route_ineligible, _} =
+             Eligibility.check("{}", %{context | route_class: :invalid}, options)
+
+    changed = %{options | transport: %{options.transport | route_class: nil}}
+
+    assert {:skip, :route_ineligible, _} =
+             Eligibility.check("{}", %{context | route_class: nil}, changed)
+
+    string_context = %{
+      "endpoint" => @responses_endpoint,
+      "route_class" => "proxy_http",
+      "route_state" => %{"routing_settings" => %{"request_compression_enabled" => true}}
+    }
+
+    assert {:eligible, _} = Eligibility.check("{}", string_context, options)
+
+    changed =
+      RequestOptions.mark_openai_compatibility_origin(
+        options,
+        @public_responses_endpoint,
+        @responses_endpoint
+      )
+
+    changed = %{
+      changed
+      | openai_compatibility: Map.put(changed.openai_compatibility, :source_endpoint, nil)
+    }
+
+    assert {:eligible, _} = Eligibility.check("{}", %{context | endpoint: nil}, changed)
+
+    assert {:skip, :route_ineligible, _} =
+             Eligibility.check("{}", %{context | endpoint: "invalid"}, options)
+
+    {compact_context, compact_options} =
+      request_context(response_body(),
+        endpoint: @compact_endpoint,
+        upstream_endpoint: "/unsupported",
+        route_class: RouteClass.proxy_compact(),
+        transport: "http_compact_json"
+      )
+
+    assert {:skip, :route_ineligible, _} =
+             Eligibility.check("{}", compact_context, compact_options)
+  end
+
   defp assert_attempted_noop_metadata(metadata, route_class, transport, bytes) do
     assert %{
              "enabled" => true,
@@ -340,7 +396,7 @@ defmodule CodexPooler.Gateway.RequestCompression.EligibilityTest do
     upstream_endpoint = Keyword.get(opts, :upstream_endpoint, @responses_endpoint)
     route_class = Keyword.get(opts, :route_class, RouteClass.proxy_http())
     transport = Keyword.get(opts, :transport, default_transport(route_class))
-    payload = Jason.decode!(body)
+    payload = CodexPooler.JSON.decode!(body)
 
     request_options =
       %{transport: transport, upstream_endpoint: upstream_endpoint}
@@ -397,7 +453,7 @@ defmodule CodexPooler.Gateway.RequestCompression.EligibilityTest do
       "input" => []
     }
     |> Map.merge(overrides)
-    |> Jason.encode!()
+    |> CodexPooler.JSON.encode!()
   end
 
   defp model do

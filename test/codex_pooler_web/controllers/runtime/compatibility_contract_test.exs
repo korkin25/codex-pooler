@@ -2762,6 +2762,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                path: "/v1/audio/transcriptions",
                caller_models: ["gpt-4o-transcribe", "gpt-transcribe"],
                caller_aliases: %{"gpt-transcribe" => "gpt-4o-transcribe"},
+               response_formats: ["json"],
+               rejected_fields: ["language", "temperature"],
                alias_scope: "caller_input_only",
                canonical_model: "gpt-4o-transcribe",
                decoded_list_fields: %{
@@ -3277,7 +3279,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     fixtures_dir
     |> Path.join("*.json")
     |> Path.wildcard()
-    |> Enum.map(&Jason.decode!(File.read!(&1)))
+    |> Enum.map(&CodexPooler.JSON.decode!(File.read!(&1)))
     |> Enum.find(&(&1["scenario_id"] == scenario_id))
     |> case do
       nil -> flunk("missing SDK-shape fixture: #{scenario_id}")
@@ -3291,7 +3293,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
     manifest_path
     |> File.read!()
-    |> Jason.decode!()
+    |> CodexPooler.JSON.decode!()
     |> Map.fetch!("fixture_files")
   end
 

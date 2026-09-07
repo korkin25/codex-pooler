@@ -139,7 +139,12 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
                    "content" => [%{"type" => "output_text", "text" => "synthetic answer"}]
                  }
                ],
-               "usage" => %{"input_tokens" => 4, "output_tokens" => 6, "total_tokens" => 10}
+               "usage" => %{
+                 "input_tokens" => 4,
+                 "output_tokens" => 6,
+                 "total_tokens" => 10,
+                 "compute_units" => 7
+               }
              }
            }}
         ])
@@ -175,6 +180,7 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
                }
              ],
              "usage" => %{
+               "compute_units" => 7,
                "prompt_tokens" => 4,
                "completion_tokens" => 6,
                "total_tokens" => 10
@@ -210,6 +216,10 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
 
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
     assert attempt.status == "succeeded"
+
+    refute inspect(
+             {request.request_metadata, attempt.response_metadata, RequestLogs.list(setup.pool)}
+           ) =~ "compute_units"
   end
 
   @tag :external_issues_229_231
@@ -707,7 +717,12 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
              "response" => %{
                "id" => "resp_chat_stream",
                "status" => "completed",
-               "usage" => %{"input_tokens" => 3, "output_tokens" => 4, "total_tokens" => 7}
+               "usage" => %{
+                 "input_tokens" => 3,
+                 "output_tokens" => 4,
+                 "total_tokens" => 7,
+                 "compute_units" => 7
+               }
              }
            }}
         ])
@@ -736,7 +751,7 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
     assert Enum.all?(chat_chunks(conn.resp_body), &(&1["service_tier"] == "fast"))
 
     assert conn.resp_body =~
-             "\"usage\":{\"completion_tokens\":4,\"prompt_tokens\":3,\"total_tokens\":7}"
+             "\"usage\":{\"completion_tokens\":4,\"compute_units\":7,\"prompt_tokens\":3,\"total_tokens\":7}"
 
     assert conn.resp_body =~ "data: [DONE]\n\n"
     assert conn.resp_body |> chat_chunk_ids() |> Enum.uniq() == ["resp_chat_stream"]
@@ -1036,7 +1051,7 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
         }
       }
 
-    raw_failed = "event: \t \ndata: " <> Jason.encode!(failed) <> "\n\n"
+    raw_failed = "event: \t \ndata: " <> CodexPooler.JSON.encode!(failed) <> "\n\n"
 
     late_completed =
       {"response.completed",
@@ -2968,7 +2983,7 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
       flunk("expected successful Chat response status")
     end
 
-    case Jason.decode(response.resp_body) do
+    case CodexPooler.JSON.decode(response.resp_body) do
       {:ok, %{"id" => ^expected_id}} ->
         :ok
 
@@ -3184,7 +3199,7 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
     |> Enum.filter(&String.starts_with?(&1, "data: "))
     |> Enum.map(&String.replace_prefix(&1, "data: ", ""))
     |> Enum.reject(&(&1 == "[DONE]"))
-    |> Enum.map(&Jason.decode!/1)
+    |> Enum.map(&CodexPooler.JSON.decode!/1)
   end
 
   defp synthetic_terminal_error do

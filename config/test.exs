@@ -1,5 +1,7 @@
 import Config
 
+config :six, skip_files: [~r{\Adev_support/}]
+
 config :argon2_elixir, t_cost: 1, m_cost: 8
 
 test_postgres_user =

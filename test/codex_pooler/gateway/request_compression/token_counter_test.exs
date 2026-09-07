@@ -149,4 +149,17 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
                TokenCounter.count_lower_bound("unknown-tokenizer-port-model", "Hello, world!")
     end
   end
+
+  test "invalid API types are rejected and empty input counts zero" do
+    assert TokenCounter.count(nil, "text") == {:error, :unsupported_model}
+    assert TokenCounter.count_lower_bound("gpt-4o", nil) == {:error, :unsupported_model}
+    assert TokenCounter.encoding_for_model(nil) == {:error, :unsupported_model}
+    assert {:ok, 0, _} = TokenCounter.count("gpt-4o", "")
+  end
+
+  test "bounded prefix trims incomplete multibyte characters" do
+    prefix = String.duplicate("a ", 4095)
+    assert {:ok, expected, _} = TokenCounter.count("gpt-4o", prefix)
+    assert {:ok, ^expected, _} = TokenCounter.count_lower_bound("gpt-4o", prefix <> "😀 tail")
+  end
 end

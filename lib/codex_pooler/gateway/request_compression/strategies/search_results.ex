@@ -107,9 +107,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
   end
 
   defp parse_entries(lines, grouped_entries) do
+    grouped_indexes = MapSet.new(grouped_entries, & &1.index)
+
     direct_entries =
       lines
       |> Enum.with_index()
+      |> Enum.reject(fn {_line, index} -> MapSet.member?(grouped_indexes, index) end)
       |> parse_direct_entries()
 
     (direct_entries ++ grouped_entries)

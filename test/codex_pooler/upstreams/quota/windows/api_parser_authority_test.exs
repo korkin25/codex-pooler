@@ -269,6 +269,67 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ApiParserAuthorityTest do
     end
   end
 
+  test "Spark permission remains bound to the accepted API snapshot across old and equal responses" do
+    identity = active_upstream_identity_fixture()
+    old_at = DateTime.utc_now() |> DateTime.add(-120) |> DateTime.truncate(:second)
+    at = DateTime.add(old_at, 60)
+    reset = DateTime.add(at, 10_080 * 60)
+    base = payload(:spark, 10_080, 100, reset)
+
+    denied =
+      update_in(base["additional_rate_limits"], fn [limit] ->
+        [
+          update_in(
+            limit["rate_limit"],
+            &Map.merge(&1, %{"allowed" => false, "limit_reached" => true})
+          )
+        ]
+      end)
+
+    available =
+      update_in(base["additional_rate_limits"], fn [limit] ->
+        [
+          update_in(
+            limit["rate_limit"],
+            &Map.merge(&1, %{"allowed" => true, "limit_reached" => false})
+          )
+        ]
+      end)
+
+    assert {:ok, [_]} =
+             Windows.upsert_quota_windows_from_codex_usage_payload(identity, denied, old_at)
+
+    assert {:ok, [accepted]} =
+             Windows.upsert_quota_windows_from_codex_usage_payload(identity, available, at)
+
+    assert accepted.metadata["rate_limit_allowed"] == true
+    assert accepted.metadata["rate_limit_reached"] == false
+
+    for observed_at <- [old_at, at] do
+      assert {:ok, [unchanged]} =
+               Windows.upsert_quota_windows_from_codex_usage_payload(
+                 identity,
+                 denied,
+                 observed_at
+               )
+
+      assert unchanged.metadata == accepted.metadata
+      assert unchanged.observed_at == accepted.observed_at
+      assert unchanged.last_sync_at == accepted.last_sync_at
+      assert Decimal.equal?(unchanged.used_percent, 100)
+    end
+
+    assert {:ok, [missing]} =
+             Windows.upsert_quota_windows_from_codex_usage_payload(
+               identity,
+               base,
+               DateTime.add(at, 1)
+             )
+
+    refute Map.has_key?(missing.metadata, "rate_limit_allowed")
+    refute Map.has_key?(missing.metadata, "rate_limit_reached")
+  end
+
   defp payload(meter, minutes, used, reset) do
     window = %{
       "used_percent" => used,

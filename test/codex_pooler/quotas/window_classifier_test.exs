@@ -75,6 +75,48 @@ defmodule CodexPooler.Quotas.WindowClassifierTest do
     end
   end
 
+  test "normalizes atom descriptors and whitespace without inferring durations" do
+    for {kind, minutes, expected} <- [
+          {:primary, " 300 ", :primary_5h},
+          {:secondary, "10080", :weekly_secondary},
+          {:primary, "43200", :monthly_primary},
+          {:primary, "10080", :unknown_account_primary},
+          {:secondary, "300", :unknown}
+        ] do
+      assert WindowClassifier.classify(%{
+               "quota_key" => " ACCOUNT ",
+               "quota_scope" => :account,
+               "quota_family" => :account,
+               "window_kind" => kind,
+               "window_minutes" => minutes
+             }) == expected
+    end
+  end
+
+  test "malformed durations remain unknown primary evidence and never become a known window" do
+    for duration <- ["300x", "300.0", "", " ", 300.0, false, [], %{}, nil, -1, 0] do
+      window = account_window(%{window_kind: "primary", window_minutes: duration})
+      assert WindowClassifier.classify(window) == :unknown_account_primary
+      refute WindowClassifier.primary_5h?(window)
+      refute WindowClassifier.monthly_primary?(window)
+      refute WindowClassifier.weekly_secondary?(window)
+    end
+  end
+
+  test "each account identity dimension is required and invalid inputs stay unknown" do
+    valid = account_window(%{window_kind: "primary", window_minutes: 300})
+
+    for field <- [:quota_key, :quota_scope, :quota_family],
+        value <- [nil, false, true, [], %{}, "model"] do
+      assert WindowClassifier.classify(Map.put(valid, field, value)) == :unknown
+    end
+
+    for value <- [nil, false, [], "account", 300] do
+      assert WindowClassifier.classify(value) == :unknown
+      refute WindowClassifier.unknown_account_primary?(value)
+    end
+  end
+
   defp account_window(overrides) do
     Map.merge(
       %{

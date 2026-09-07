@@ -2,6 +2,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   use CodexPooler.DataCase, async: false
 
   alias CodexPooler.Catalog.{OpenAIPricingImporter, PricingSnapshot}
+  alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
@@ -90,6 +91,109 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     refute rendered_error =~ "secret"
   end
 
+  test "invalid import locations cannot insert pricing rows" do
+    before_count = Repo.aggregate(PricingSnapshot, :count)
+
+    for value <- [nil, 42, [], %{}] do
+      assert {:error, %{code: :invalid_path}} = OpenAIPricingImporter.import_file(value)
+      assert {:error, %{code: :invalid_url}} = OpenAIPricingImporter.import_url(value)
+    end
+
+    assert Repo.aggregate(PricingSnapshot, :count) == before_count
+  end
+
+  test "missing files return a bounded read error without inserting rows" do
+    before_count = Repo.aggregate(PricingSnapshot, :count)
+
+    missing =
+      Path.join(System.tmp_dir!(), "missing-pricing-#{System.unique_integer([:positive])}")
+
+    assert {:error, %{code: :file_read_failed, message: message}} =
+             OpenAIPricingImporter.import_file(missing)
+
+    assert message == :enoent |> :file.format_error() |> to_string()
+    assert Repo.aggregate(PricingSnapshot, :count) == before_count
+  end
+
+  test "HTTP imports canonicalize aliases across repeat fetches without creating models" do
+    prices = %{"default" => %{"input" => 1, "output" => 2}}
+    payload = valid_payload("http-alias-model", %{"fast" => prices, "priority" => prices})
+
+    canonical_payload =
+      put_in(payload, ["models", "http-alias-model", "prices"], %{"priority" => prices})
+
+    models_before = Repo.aggregate(CodexPooler.Catalog.Model, :count)
+
+    {:ok, upstream} =
+      FakeUpstream.start_link(
+        {:sequence, [{:json, 200, payload}, {:json, 200, canonical_payload}]}
+      )
+
+    on_exit(fn -> FakeUpstream.stop(upstream) end)
+    url = FakeUpstream.url(upstream) <> "/pricing.json"
+
+    assert {:ok, %{inserted: 1}} = OpenAIPricingImporter.import_url(url)
+
+    snapshot =
+      Repo.one!(from row in PricingSnapshot, where: row.model_identifier == "http-alias-model")
+
+    assert snapshot.config["service_tier"] == "priority"
+    assert snapshot.source_url == url
+    assert {:ok, %{inserted: 0}} = OpenAIPricingImporter.import_url(url)
+
+    assert Repo.one!(
+             from row in PricingSnapshot, where: row.model_identifier == "http-alias-model"
+           ) == snapshot
+
+    assert Repo.aggregate(CodexPooler.Catalog.Model, :count) == models_before
+  end
+
+  test "HTTP status, invalid JSON and incompatible catalogs fail without writes" do
+    before_count = Repo.aggregate(PricingSnapshot, :count)
+
+    {:ok, upstream} =
+      FakeUpstream.start_link(
+        {:sequence,
+         [
+           {:raw_body, 503, "temporary upstream error", []},
+           {:raw_body, 200, "not JSON", []},
+           {:json, 200, %{"models" => []}}
+         ]}
+      )
+
+    on_exit(fn -> FakeUpstream.stop(upstream) end)
+    url = FakeUpstream.url(upstream) <> "/pricing.json"
+
+    assert {:error, %{code: :http_error, message: "pricing catalog returned HTTP 503"}} =
+             OpenAIPricingImporter.import_url(url)
+
+    assert {:error, %{code: :invalid_json}} = OpenAIPricingImporter.import_url(url)
+
+    assert {:error, %{code: :incompatible_pricing_catalog}} =
+             OpenAIPricingImporter.import_url(url)
+
+    assert Repo.aggregate(PricingSnapshot, :count) == before_count
+  end
+
+  test "malformed URL strings return bounded errors without writes" do
+    before_count = Repo.aggregate(PricingSnapshot, :count)
+
+    for url <- [
+          "",
+          "not a URL",
+          "ftp://example.com/pricing.json",
+          "http://",
+          "http://[invalid",
+          "http://example.com:bad",
+          "http://example.com:0",
+          "http://example.com:65536"
+        ] do
+      assert {:error, %{code: :invalid_url}} = OpenAIPricingImporter.import_url(url)
+    end
+
+    assert Repo.aggregate(PricingSnapshot, :count) == before_count
+  end
+
   test "imports revision 2 rows from the immutable fixture idempotently" do
     assert {:ok, first} = OpenAIPricingImporter.import_file(@fixture)
     assert first.price_version == "2026-07-28T17:25:03.915713Z:importer-format-2"
@@ -111,7 +215,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   end
 
   test "imports the reviewed September 3 target as canonical revision 2 rows" do
-    payload = @target |> File.read!() |> Jason.decode!()
+    payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
 
     assert Map.keys(payload["models"]) |> Enum.filter(&(&1 in @removed_identifiers)) == []
 
@@ -170,7 +274,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
   test "target checksum, exact rates, removals, and schema descriptors detect drift" do
     raw = File.read!(@target)
-    payload = Jason.decode!(raw)
+    payload = CodexPooler.JSON.decode!(raw)
     expected_rates = @reviewed_fast_long_context_rates["gpt-5.6-luna"] |> Enum.map(&Decimal.new/1)
 
     one_byte_path = write_raw!(raw <> " ")
@@ -186,7 +290,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     rate_path = write_json!(rate_mutation)
 
     refute source_rates(
-             Jason.decode!(File.read!(rate_path)),
+             CodexPooler.JSON.decode!(File.read!(rate_path)),
              "gpt-5.6-luna",
              "fast",
              "long_context"
@@ -201,7 +305,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
     removal_path = write_json!(removal_mutation)
 
-    assert Map.keys(Jason.decode!(File.read!(removal_path))["models"])
+    assert Map.keys(CodexPooler.JSON.decode!(File.read!(removal_path))["models"])
            |> Enum.filter(&(&1 in @removed_identifiers)) == [hd(@removed_identifiers)]
 
     schema_mutation =
@@ -396,7 +500,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   test "duplicate raw JSON keys and normalized model collisions fail without writes" do
     duplicate =
       String.replace(
-        Jason.encode!(valid_payload()),
+        CodexPooler.JSON.encode!(valid_payload()),
         ~s("tools_count":1),
         ~s("tools_count":1,"tools_count":1)
       )
@@ -591,6 +695,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
       end,
       cache_write: fn snapshot ->
         Ecto.Changeset.change(snapshot, cache_write_token_micros: Decimal.new(9))
+      end,
+      unknown_cache_write: fn snapshot ->
+        Ecto.Changeset.change(snapshot, cache_write_token_micros: nil)
       end,
       output: fn snapshot ->
         Ecto.Changeset.change(snapshot, output_token_micros: Decimal.new(9))
@@ -1037,7 +1144,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
   defp shutdown_task(_task), do: :ok
 
-  defp write_json!(payload), do: payload |> Jason.encode!() |> write_raw!()
+  defp write_json!(payload), do: payload |> CodexPooler.JSON.encode!() |> write_raw!()
 
   defp write_raw!(raw) do
     path =

@@ -46,7 +46,9 @@ defmodule CodexPooler.Jobs.AlertDeliveryWorker do
     persisted_attempt_number =
       Alerts.next_delivery_attempt_number(incident_id, channel_id, attempt)
 
-    case Alerts.deliver_incident_to_channel(incident_id, channel_id, persisted_attempt_number) do
+    case Alerts.deliver_incident_to_channel(incident_id, channel_id, persisted_attempt_number,
+           retry_attempt: attempt
+         ) do
       {:ok, _attempt} -> :ok
       {:error, %{retryable: true} = reason} -> {:error, Map.take(reason, [:code, :retryable])}
       {:error, reason} -> {:cancel, sanitize_error(reason)}

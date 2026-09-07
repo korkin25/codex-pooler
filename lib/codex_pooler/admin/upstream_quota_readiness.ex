@@ -121,8 +121,9 @@ defmodule CodexPooler.Admin.UpstreamQuotaReadiness do
       else: "missing_evidence"
   end
 
-  defp readiness_state(_account_windows, %{routing_state: :precise}, _selected_windows, _as_of),
-    do: "ready"
+  defp readiness_state(_account_windows, %{routing_state: state}, _selected_windows, _as_of)
+       when state in [:precise, :provider_available],
+       do: "ready"
 
   defp readiness_state(
          _account_windows,
@@ -264,6 +265,9 @@ defmodule CodexPooler.Admin.UpstreamQuotaReadiness do
   end
 
   @spec reason_codes(map(), [window()], DateTime.t()) :: [String.t()]
+  defp reason_codes(%{eligible?: true, routing_state: :provider_available}, _windows, _as_of),
+    do: []
+
   defp reason_codes(eligibility, account_windows, as_of) do
     exclusions = Map.get(eligibility, :exclusions, [])
     warnings = Map.get(eligibility, :warnings, [])

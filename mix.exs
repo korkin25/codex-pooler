@@ -5,7 +5,7 @@ defmodule CodexPooler.MixProject do
     [
       app: :codex_pooler,
       # x-release-please-start-version
-      version: "0.7.1-kk.3",
+      version: "0.7.3-kk.1",
       # x-release-please-end
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -87,11 +87,10 @@ defmodule CodexPooler.MixProject do
       {:telemetry_poller, "== 1.3.0"},
       {:zoneinfo, "== 0.1.9"},
       {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
-      {:dialyxir, "== 1.4.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "== 1.4.8", only: [:dev, :test], runtime: false},
       {:sobelow, "== 0.15.0", only: [:dev, :test], runtime: false},
       {:six, "== 0.4.1", only: :test},
       {:gettext, "== 1.0.2"},
-      {:jason, "== 1.4.5"},
       {:dns_cluster, "== 0.3.0"},
       {:websock, "== 0.5.3"},
       {:websock_adapter, "== 0.6.0"},

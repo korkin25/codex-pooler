@@ -18,6 +18,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
+  alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Reconciliation.PoolReconciliation
@@ -86,7 +87,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
         refute Map.has_key?(redemption, key)
       end
 
-      metadata_json = Jason.encode!(persisted.metadata)
+      metadata_json = CodexPooler.JSON.encode!(persisted.metadata)
       refute metadata_json =~ "credit_1"
       refute metadata_json =~ redeem_request_id
     end
@@ -321,7 +322,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       assert redemption["provider_replay"]["provider_dispatches"] == 1
       assert is_binary(locator)
 
-      metadata_json = Jason.encode!(metadata)
+      metadata_json = CodexPooler.JSON.encode!(metadata)
       refute metadata_json =~ "credit_original"
       refute metadata_json =~ "credit_other"
 
@@ -1951,7 +1952,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
         claim = Repo.reload!(identity).metadata["saved_reset_redemption"]
         assert claim["status"] == "redeeming"
         assert claim["trigger_detail"] == detail
-        refute Jason.encode!(claim) =~ "caller-controlled-provider-token"
+        refute CodexPooler.JSON.encode!(claim) =~ "caller-controlled-provider-token"
 
         send(fake_request_pid, {:fake_upstream_release_timeout, release_ref})
 
@@ -1971,7 +1972,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
           end
 
         assert persisted["trigger_detail"] == detail
-        refute Jason.encode!(persisted) =~ "caller-controlled-provider-token"
+        refute CodexPooler.JSON.encode!(persisted) =~ "caller-controlled-provider-token"
       end
     end
 
@@ -2029,7 +2030,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       # The key is a deterministic function of the persisted attempt id and
       # generation, so the same attempt reproduces it without persisting a
       # raw secret in the identity metadata.
-      refute Jason.encode!(persisted.metadata) =~ first_key
+      refute CodexPooler.JSON.encode!(persisted.metadata) =~ first_key
 
       expected =
         :sha256
@@ -2248,7 +2249,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       assert saved_resets["expires_refresh_attempted_at"] == "2026-07-24T03:00:00Z"
       assert persisted.saved_reset_first_seen_ledger == ledger
 
-      metadata_json = Jason.encode!(persisted.metadata)
+      metadata_json = CodexPooler.JSON.encode!(persisted.metadata)
 
       refute metadata_json =~ "used_credit"
       refute metadata_json =~ "redeem_request_id"
@@ -3616,6 +3617,64 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     end
 
     @tag :saved_reset_redemption_cause
+    test "scheduled available rounded-full quota preserves threshold and last-call policies only" do
+      for {mode, expires_in_seconds, expected} <- [
+            {"blocked", 4 * 60 * 60, :not_ready},
+            {"threshold", 4 * 60 * 60, "threshold"},
+            {"blocked", 60 * 60, "last_call"}
+          ] do
+        %{identity: identity, assignment: assignment, as_of: as_of} =
+          scheduled_expiry_fixture(
+            quota_used_percent: Decimal.new(100),
+            expires_in_seconds: expires_in_seconds,
+            quota_overrides: %{
+              metadata: %{"rate_limit_allowed" => true, "rate_limit_reached" => false}
+            },
+            policy_attrs: %{saved_reset_auto_redeem_trigger_mode: mode}
+          )
+
+        identity =
+          identity
+          |> Ecto.Changeset.change(
+            metadata:
+              Map.put(
+                identity.metadata,
+                "quota_account_availability",
+                AccountAvailabilityStore.encode!(:available, as_of, 1)
+              )
+          )
+          |> Repo.update!()
+
+        context = gateway_auto_context(assignment, identity, :blocked_weekly_exhaustion)
+        assert {:ok, context} = AutoEligibility.normalize_context(context)
+
+        assert {:noop, "gateway_auto_trigger_not_current"} =
+                 AutoEligibility.validate_locked_gateway_auto(
+                   identity,
+                   assignment,
+                   context,
+                   as_of
+                 )
+
+        result =
+          AutoEligibility.validate_locked_scheduled_expiry(
+            identity,
+            assignment,
+            identity.id,
+            as_of,
+            SavedResets.redemption_receive_timeout_ms()
+          )
+
+        if expected == :not_ready do
+          assert {:noop, "scheduled_expiry_burn_not_ready"} == result
+          refute AutoEligibility.scheduled_expiry_candidate?(identity, as_of)
+        else
+          assert {:ok, %{trigger_detail: ^expected}} = result
+          assert AutoEligibility.scheduled_expiry_candidate?(identity, as_of)
+        end
+      end
+    end
+
     test "eligible scheduled rescue consumes once through the shared redemption pipeline" do
       %{as_of: as_of, fake: fake, identity: identity, assignment: assignment} =
         scheduled_expiry_fixture()
@@ -6051,7 +6110,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       assert run_unboxed(fn -> Repo.get!(UpstreamIdentity, target_id).metadata end) ==
                before_target
 
-      refute Jason.encode!(before_target) =~ "acct_cohort_lock"
+      refute CodexPooler.JSON.encode!(before_target) =~ "acct_cohort_lock"
     end
 
     test "threshold sibling capacity gate rejects unusable evidence without false vetoes" do

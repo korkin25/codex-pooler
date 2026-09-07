@@ -281,7 +281,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
 
   defp metadata_owner_instance_id(
          _state,
-         %RequestOptions{transport: %{websocket_owner_instance_id: owner_instance_id}}
+         %RequestOptions{transport: %{websocket_owner: %{owner_instance_id: owner_instance_id}}}
        )
        when is_binary(owner_instance_id),
        do: owner_instance_id
@@ -300,7 +300,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   defp metadata_owner_instance_id(_state, _opts), do: nil
 
   defp metadata_proxy_instance_id(%RequestOptions{
-         transport: %{websocket_owner_proxy_instance_id: proxy_instance_id}
+         transport: %{websocket_owner: %{proxy_instance_id: proxy_instance_id}}
        })
        when is_binary(proxy_instance_id),
        do: proxy_instance_id
@@ -317,7 +317,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
 
   defp metadata_downstream_epoch(
          _state,
-         %RequestOptions{transport: %{websocket_owner_downstream_epoch: epoch}}
+         %RequestOptions{transport: %{websocket_owner: %{downstream_epoch: epoch}}}
        )
        when is_integer(epoch),
        do: Integer.to_string(epoch)

@@ -299,7 +299,7 @@ defmodule CodexPooler.Alerts.Delivery.AttemptLifecycle do
           on: rule.id == target.rule_id,
           join: link in AlertRuleChannel,
           on: link.alert_rule_id == rule.id and link.alert_channel_id == ^channel_id,
-          where: target.incident_id == ^incident_id,
+          where: target.incident_id == ^incident_id and rule.state == "active",
           select: max(rule.cooldown_minutes)
       )
 

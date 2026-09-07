@@ -75,11 +75,19 @@ defmodule CodexPooler.Files.CreateValidation do
        )}
 
   defp required_string(params, key) do
-    value = params |> param_value(key) |> to_string() |> String.trim()
+    case param_value(params, key) do
+      nil ->
+        {:error, error(400, :invalid_request, "#{key} is required", Atom.to_string(key))}
 
-    if value == "",
-      do: {:error, error(400, :invalid_request, "#{key} is required", Atom.to_string(key))},
-      else: {:ok, value}
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> {:error, error(400, :invalid_request, "#{key} is required", Atom.to_string(key))}
+          value -> {:ok, value}
+        end
+
+      _value ->
+        {:error, error(400, :invalid_request, "#{key} must be a string", Atom.to_string(key))}
+    end
   end
 
   defp required_positive_integer(params, key) do
@@ -122,16 +130,14 @@ defmodule CodexPooler.Files.CreateValidation do
   end
 
   defp normalize_use_case(params) do
-    use_case =
-      params
-      |> param_value(:use_case)
-      |> case do
-        nil -> @default_use_case
-        value -> value
-      end
-      |> to_string()
-      |> String.trim()
+    case param_value(params, :use_case) do
+      nil -> {:ok, @default_use_case}
+      value when is_binary(value) -> validate_use_case(String.trim(value))
+      _value -> {:error, error(400, :invalid_request, "use_case must be a string", "use_case")}
+    end
+  end
 
+  defp validate_use_case(use_case) do
     case use_case do
       "" ->
         {:ok, @default_use_case}
@@ -145,7 +151,8 @@ defmodule CodexPooler.Files.CreateValidation do
     end
   end
 
-  defp param_value(params, key), do: Map.get(params, Atom.to_string(key)) || Map.get(params, key)
+  defp param_value(params, key),
+    do: Map.get(params, Atom.to_string(key), Map.get(params, key))
 
   defp error(status, code, message, param \\ nil),
     do: %{status: status, code: code, message: message, param: param}

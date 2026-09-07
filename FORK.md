@@ -1,12 +1,13 @@
 # Modified distribution
 
-This is a modified distribution of iCoreTech Codex Pooler 0.7.1, forked from
+This is a modified distribution of iCoreTech Codex Pooler 0.7.3, forked from
 https://github.com/icoretech/codex-pooler at
-`b2d025c7430faab3fdb1ef503b5ba701536bd9f8`. Upstream history, copyright and
+`8ae4595fc9d5f09eb9e185476d51d7add6180ccd`. Upstream history, copyright and
 Elastic License 2.0 (`LICENSE.md`) are retained. This fork is maintained at
 https://github.com/korkin25/codex-pooler and is not an upstream release.
 
-Version series `0.7.1-kk.N` carries the following changes:
+Version series `0.7.3-kk.N` adopts upstream 0.7.3 and retains the following
+quota changes introduced in `0.7.1-kk.N`:
 
 - The latest valid, non-future Usage API observation is the quota authority for
   display, quota selection and the matching exported selection. A newer API
@@ -17,8 +18,9 @@ Version series `0.7.1-kk.N` carries the following changes:
 - Runtime headers and rate-limit events remain raw diagnostics. They do not
   override an API percentage or manufacture an unsupported API meter. Ordinary
   source/reset disagreement no longer replaces the main percentage or countdown
-  with a warning. Source diagnostics are collapsed by default and retain each
-  report's values, source, observation time, reset and freshness.
+  with a warning. The upstream evidence dialog opens on demand, keeps the reading snapshot
+  stable while open, and lists the selected record first with expandable details.
+  It retains source values, observation time, reset and freshness.
 - Failed or missing API refreshes do not establish fresh capacity. Retained API
   values show their last observation age and become historical/stale, including
   additional Spark/Reserve meters. Missing measurements remain unknown; an
@@ -32,7 +34,9 @@ Version series `0.7.1-kk.N` carries the following changes:
   a newer matching API observation can supersede it. Matching uses the full
   canonical meter identity, including additional-meter tokens. This does not
   change provider permission flags or make a successful API poll proof that a
-  model request will succeed.
+  model request will succeed. Upstream's fresh explicit account and model-specific
+  permissions remain independent of the displayed percentage, including the
+  supported Spark grant; a current actual rejection still constrains routing.
 - A runtime/API mismatch requests a full account reconciliation through the
   existing worker. The identity-scoped 60-second enqueue cooldown includes
   cancelled/failed attempts, and unfinished jobs prevent overlapping automatic
@@ -64,8 +68,11 @@ Saved Reset enable/trigger defaults, consumption latch, confirmation lifecycle,
 force; a source mismatch alone does not justify spending or confirming a reset.
 The separate proposed active-work/expiration policy is not implemented here.
 
-No database migration, new worker or OAuth refresh owner is added. Account
-credentials, enrollment, pool assignments and gateway keys require no migration.
+The quota changes add no new worker or OAuth refresh owner. This integration
+includes upstream's alert-delivery migration allowing lifetime attempt numbers
+beyond one retry cycle; it does not migrate account credentials, enrollment,
+pool assignments or gateway keys. The upstream native JSON codec replaces Jason
+throughout this distribution, including the fork's request-rejection handling.
 There is no new quota history store: observations already overwritten by their
 own source cannot be reconstructed. Account metrics and history depend on the
 retained evidence and monitoring backend; collector success alone does not
@@ -79,5 +86,5 @@ combine VERSION and the full source SHA; source/version/upstream labels and OCI
 provenance identify the artifact. Existing tags must never be overwritten.
 Deployment pins the resulting digest through the existing Helm chart.
 
-Local verification uses Elixir 1.20.2/OTP 28 and disposable PostgreSQL 18 with
+Local verification uses Elixir 1.20.4/OTP 29 and disposable PostgreSQL 18 with
 `MIX_ENV=test`. `mix test` resets only the configured synthetic test database.

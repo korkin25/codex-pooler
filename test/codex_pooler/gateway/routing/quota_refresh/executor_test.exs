@@ -18,6 +18,48 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.ExecutorTest do
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
 
+  test "another database session holding the refresh lock prevents upstream work" do
+    upstream = start_upstream(FakeUpstream.json_response(%{}))
+    setup = gateway_setup(upstream, quota?: false)
+    plan = stale_plan(setup)
+    lock_key = :erlang.phash2({Executor, :quota_refresh, setup.assignment.id}, 2_147_483_647)
+    config = Keyword.take(Repo.config(), [:hostname, :port, :username, :password, :database])
+    connection = start_supervised!({Postgrex, config})
+    %{rows: [[other_backend]]} = Postgrex.query!(connection, "select pg_backend_pid()", [])
+    %{rows: [[own_backend]]} = Repo.query!("select pg_backend_pid()")
+    refute other_backend == own_backend
+    Postgrex.query!(connection, "select pg_advisory_lock($1)", [lock_key])
+
+    try do
+      assert {:error, %{code: "quota_evidence_unavailable", quota_refresh_attempted: true}} =
+               Executor.refresh_stale_candidates(plan)
+
+      assert FakeUpstream.count(upstream) == 0
+      assert %{rows: [[false]]} = Repo.query!("select pg_try_advisory_lock($1)", [lock_key])
+    after
+      Postgrex.query!(connection, "select pg_advisory_unlock($1)", [lock_key])
+    end
+  end
+
+  test "an assignment removed after planning fails closed and releases the refresh lock" do
+    upstream = start_upstream(FakeUpstream.json_response(%{}))
+    setup = gateway_setup(upstream, quota?: false)
+    plan = stale_plan(setup)
+    Repo.delete!(setup.assignment)
+
+    log =
+      capture_log(fn ->
+        assert {:error, %{code: "quota_evidence_unavailable"}} =
+                 Executor.refresh_stale_candidates(plan)
+      end)
+
+    assert log =~ "quota refresh skipped"
+    assert log =~ "failure_kind=error"
+    assert FakeUpstream.count(upstream) == 0
+    lock_key = :erlang.phash2({Executor, :quota_refresh, setup.assignment.id}, 2_147_483_647)
+    assert %{rows: [[false]]} = Repo.query!("select pg_advisory_unlock($1)", [lock_key])
+  end
+
   test "refresh failures stay best-effort and return the structured quota error" do
     upstream = start_upstream(FakeUpstream.json_response(%{}))
     setup = gateway_setup(upstream, quota?: false)
@@ -59,6 +101,9 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.ExecutorTest do
     assert log =~ "quota refresh skipped"
     assert log =~ "assignment_id=not-a-uuid"
     refute log =~ setup.raw_key
+
+    lock_key = :erlang.phash2({Executor, :quota_refresh, bad_assignment.id}, 2_147_483_647)
+    assert %{rows: [[false]]} = Repo.query!("select pg_advisory_unlock($1)", [lock_key])
   end
 
   test "refresh replaces quota rows and timestamp together instead of reusing the old instant" do
@@ -214,5 +259,27 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.ExecutorTest do
       end)
 
     RouteState.put_quota_snapshots(route_state, snapshots)
+  end
+
+  defp stale_plan(setup) do
+    prime_stale_routing_quota!(setup.identity)
+    {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+    endpoint = "/backend-api/codex/responses"
+    payload = %{"model" => setup.model.exposed_model_id, "input" => "quota refresh"}
+
+    input =
+      CandidateEligibility.FilterInput.new(%{
+        auth: auth,
+        model: setup.model,
+        endpoint: endpoint,
+        payload: payload,
+        request_options: RequestOptions.build(%{upstream_endpoint: endpoint}, endpoint, payload),
+        candidates: [{setup.assignment, setup.identity}]
+      })
+
+    assert {:refreshable_quota, plan} =
+             CandidateEligibility.filter_quota_eligible_candidates(input)
+
+    plan
   end
 end

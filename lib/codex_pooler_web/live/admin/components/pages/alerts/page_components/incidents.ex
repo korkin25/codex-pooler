@@ -418,7 +418,7 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
             data-role="incident-delivery-attempt-meta"
             class="mt-1 font-mono text-[0.68rem] text-base-content/55"
           >
-            Attempt {attempt.attempt_number}/{attempt.max_attempts} · {format_datetime(
+            Delivery attempt {attempt.attempt_number} · {format_datetime(
               attempt.attempted_at || attempt.completed_at
             )}
           </p>

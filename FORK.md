@@ -6,6 +6,17 @@ https://github.com/icoretech/codex-pooler at
 Elastic License 2.0 (`LICENSE.md`) are retained. This fork is maintained at
 https://github.com/korkin25/codex-pooler and is not an upstream release.
 
+From `0.7.3-kk.4`, imports capture the canonical credential state before waiting
+for persistence locks. If a refresh or another credential replacement commits
+in that interval, the stale import is rejected before writing either token.
+Explicit replacement submitted after that change remains supported. Bundle
+imports validate their snapshots together under the existing locks and retain
+duplicate-entry ordering and transaction rollback. Browser/device OAuth, relink
+and invite preparation keep their previous semantics. This adds no schema or
+refresh writer and does not solve provider rotation before database commit.
+The source fix was developed and reviewed against upstream 0.7.4; the affected
+base files match this distribution's existing 0.7.3 source.
+
 From `0.7.3-kk.3`, Prometheus histograms aggregate each observation immediately
 into fixed bucket counts and a sum. Raw observations no longer accumulate
 between scrapes, so an absent or delayed monitoring collector cannot grow a

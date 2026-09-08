@@ -6,6 +6,29 @@ https://github.com/icoretech/codex-pooler at
 Elastic License 2.0 (`LICENSE.md`) are retained. This fork is maintained at
 https://github.com/korkin25/codex-pooler and is not an upstream release.
 
+From `0.7.3-kk.5`, HTTP session owner leases are renewed while awaiting upstream
+headers and while streaming. The admitted token fences reservation, response
+aliases and terminal account binding, so a late completion cannot mutate a
+replacement owner's session. Already dispatched output remains deliverable
+after owner loss; the existing bounded shutdown and same-process HTTP stream
+lifecycle still apply.
+
+Pools can also opt into durable conversation account affinity, disabled by
+default. An explicit conversation identifier is hashed and scoped by pool,
+gateway key and model. Its advisory account preference survives the short owner
+lease and ordinary process restarts, while eligibility, quota restrictions and
+failover still apply. Successful fallback can rebind the preference under a
+generation fence. Idle expiry defaults to 24 hours and is configurable from
+60 seconds to 30 days. This does not migrate provider conversation state or
+guarantee uninterrupted streams.
+
+These changes integrate upstream PRs 364 and 365 without upgrading the 0.7.3
+base to 0.7.4 or changing its WebSocket compaction behavior. Migration
+`20260908090000` adds routing settings and affinity generation/expiry columns
+with the feature off for existing pools. Existing migrations are unchanged;
+rolling back this migration deletes durable affinity rows before removing the
+new columns. The HTTP lease fix itself adds no schema.
+
 From `0.7.3-kk.4`, imports capture the canonical credential state before waiting
 for persistence locks. If a refresh or another credential replacement commits
 in that interval, the stale import is rejected before writing either token.

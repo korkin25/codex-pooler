@@ -6,6 +6,13 @@ https://github.com/icoretech/codex-pooler at
 Elastic License 2.0 (`LICENSE.md`) are retained. This fork is maintained at
 https://github.com/korkin25/codex-pooler and is not an upstream release.
 
+From `0.7.3-kk.3`, Prometheus histograms aggregate each observation immediately
+into fixed bucket counts and a sum. Raw observations no longer accumulate
+between scrapes, so an absent or delayed monitoring collector cannot grow a
+replica's histogram storage with every database query. Existing metric names,
+bucket boundaries, fractional sums and account quota metrics are retained.
+Storage still depends on the number of distinct metric label sets.
+
 From `0.7.3-kk.2`, draining rejects new provider HTTP admission before granting
 or queueing work. Native clients receive HTTP 503 with `server_is_overloaded`;
 the rejection creates no request, attempt or ledger entry. Already admitted

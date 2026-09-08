@@ -3,6 +3,7 @@ defmodule CodexPoolerWeb.Operations.MetricsController do
 
   alias CodexPooler.InstanceSettings
   alias CodexPooler.Metrics.AccountSnapshot
+  alias CodexPoolerWeb.Telemetry.PrometheusReporter
 
   def show(conn, _params) do
     case authorize_metrics(conn) do
@@ -10,7 +11,7 @@ defmodule CodexPoolerWeb.Operations.MetricsController do
         conn
         |> put_resp_content_type("text/plain; version=0.0.4")
         |> send_resp(200, [
-          TelemetryMetricsPrometheus.Core.scrape(),
+          PrometheusReporter.scrape(),
           "\n",
           AccountSnapshot.scrape()
         ])
